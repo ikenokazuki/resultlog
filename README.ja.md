@@ -117,12 +117,33 @@ Firebase Functions と Result 型を組み合わせるプロジェクトでは�
   - [何か見つかったら](#何か見つかったら)
   - [resultlog がやらないこと](#resultlog-がやらないこと)
 - [Cloud Monitoring](#cloud-monitoring)
+  - [アラートの全体像](#アラートの全体像)
   - [コンソールで手作業で](#コンソールで手作業で)
   - [ファイルとして書き出す](#ファイルとして書き出す)
   - [作られるもの](#作られるもの)
   - [プロジェクト自体への変更](#プロジェクト自体への変更)
+  - [ロールと通知チャネル](#ロールと通知チャネル)
   - [適用](#適用)
+  - [アラートのテスト](#アラートのテスト)
+  - [チューニング](#チューニング)
+  - [費用と制限](#費用と制限)
   - [知っておくこと](#知っておくこと)
+- [アラートが出たときの対応](#アラートが出たときの対応)
+  - [ガイダンスが言っていること](#ガイダンスが言っていること)
+  - [最初の 10 分](#最初の-10-分)
+  - [アラートごとの対応](#アラートごとの対応)
+    - [Firebase Security Rules の変更](#firebase-security-rules-の変更)
+    - [IAM ポリシーの変更](#iam-ポリシーの変更)
+    - [サービスアカウントキーの作成](#サービスアカウントキーの作成)
+    - [Firebase プロジェクトや API キーの変更](#firebase-プロジェクトや-api-キーの変更)
+    - [App Check トークンの再利用](#app-check-トークンの再利用)
+    - [権限やアカウントの変更](#権限やアカウントの変更)
+    - [セキュリティイベントの急増](#セキュリティイベントの急増)
+    - [サーバーエラーとタイムアウトと LLM の問題](#サーバーエラーとタイムアウトと-llm-の問題)
+  - [証拠と記録](#証拠と記録)
+  - [事後の対応](#事後の対応)
+  - [このアラートの先](#このアラートの先)
+  - [出典](#出典)
 - [AI アシスタントと調べる](#ai-アシスタントと調べる)
 - [ログの費用](#ログの費用)
 - [マスキング](#マスキング)
@@ -1818,7 +1839,7 @@ resultlog は、不正アクセスの調査に必要なログを書き出し、�
 
 ### 管理アクティビティ監査ログと一緒に保管する
 
-GCP は、プロジェクトに対する管理操作（IAM ポリシーの変更、サービスアカウントキーの作成、関数のデプロイなど）を管理アクティビティ監査ログとして自動で記録しています。常に有効で、無料で、`_Required` バケットに 400 日保持されます。インシデントを 1 か所で調査できるよう、resultlog の監査ログ・セキュリティログと一緒に専用のバケットへコピーします:
+GCP は、プロジェクトに対する管理操作（IAM ポリシーの変更、サービスアカウントキーの作成、関数のデプロイなど）を管理アクティビティ監査ログとして自動で記録しています。常に書かれ（[Cloud Audit Logs](https://docs.cloud.google.com/logging/docs/audit)）、`_Required` バケットに 400 日保持され（[割り当てと上限](https://docs.cloud.google.com/logging/quotas)）、保存料も保持料もかかりません（[料金](https://cloud.google.com/monitoring/pricing)）。インシデントを 1 か所で調査できるよう、resultlog の監査ログ・セキュリティログと一緒に専用のバケットへコピーします:
 
 ```bash
 PROJECT_ID=your-project
@@ -1917,6 +1938,8 @@ const { data } = digest(logs, {
 
 ### 何か見つかったら
 
+Cloud Monitoring のアラートと、アラートごとの手順は、[アラートが出たときの対応](#アラートが出たときの対応)を参照してください。
+
 - **アカウントを止める。** Admin SDK でリフレッシュトークンを失効させ、必要なら無効化します（`getAuth().revokeRefreshTokens(uid)`、`updateUser(uid, { disabled: true })`）。発行済みの ID トークンは、コード側で失効を確認しない限り、期限が切れるまで有効です。セッションの失効については Firebase のガイダンスを確認してください。
 - **ブロックは短く、手前で。** 分散型の攻撃では攻撃者が同じアドレスを再利用することはまれなので、長期ではなく 15 分以内でブロックします（Datadog の推奨）。関数の中ではなく、Cloud Armor など関数の前段で行います。
 - **使われた穴を塞ぐ。** 欠けていた所有者チェックを直し、`enforceAppCheck` とリプレイ保護を有効にし、読まれた可能性のある秘密情報をローテーションします。
@@ -1931,7 +1954,29 @@ const { data } = digest(logs, {
 
 ## Cloud Monitoring
 
-resultlog のエントリは、Cloud Logging と Cloud Monitoring で読み、アラートを掛けられるように作ってあります。下のレシピでコンソールから手作業で設定することも、`resultlog monitoring` で設定一式をファイルとして書き出すこともできます。
+resultlog のエントリは、Cloud Logging と Cloud Monitoring で読み、アラートを掛けられるように作ってあります。下のレシピでコンソールから手作業で設定することも、`resultlog monitoring` で設定一式をファイルとして書き出すこともできます。アラートが届いたときにすることは[アラートが出たときの対応](#アラートが出たときの対応)にあります。この節と次の節が Google Cloud、Firebase、セキュリティの標準規格に拠っているところには、そのページへのリンクを付けました。一覧は[出典](#出典)にあります。
+
+### アラートの全体像
+
+Cloud Monitoring には、ここで使えるアラートポリシーが 2 種類あります（[アラートの概要](https://docs.cloud.google.com/monitoring/alerts)）。**指標ベース**のポリシーは、Monitoring が保存する時系列を評価します。**ログベース**のポリシーは、ログのエントリを 1 件ずつ評価します。resultlog は、役割を分けて両方を使います。
+
+- **数えるイベントには指標を使います。** 「5 分間にサーバーエラーが 5 回を超えたら」には件数が要りますが、ログベースのアラートは数えられません（[ログベースのアラート](https://docs.cloud.google.com/logging/docs/alerting/log-based-alerts)）。そこで resultlog は、エントリを[ログベース指標](https://docs.cloud.google.com/logging/docs/logs-based-metrics)にして、その指標にアラートを掛けます。指標が数えるのは、作成後に受け取ったエントリだけで、過去には遡りません。
+- **稀で重大なイベントにはログの一致を使います。** 再利用された App Check トークンや新しいサービスアカウントキーは、最初の 1 件で通知されるべきなので、エントリ自体に反応します。API 経由では、ログベースのポリシーは条件を 1 つしか持てず、通知の頻度の上限が必要で、除外フィルタで捨てられたログは見えません（同じページ）。
+
+| アラート | 種類 | 反応する条件 | 既定 | 重大度 | 対応 |
+|---|---|---|---|---|---|
+| サーバーエラー | 指標 | 1 つの関数で ERROR 以上の実行が N 回を超えた | 5 分間に 5 回 | ERROR | [サーバーエラーとタイムアウトと LLM の問題](#サーバーエラーとタイムアウトと-llm-の問題) |
+| セキュリティイベントの急増 | 指標 | 同じ種類のセキュリティイベントが N 回を超えた | 5 分間に 20 回 | WARNING | [セキュリティイベントの急増](#セキュリティイベントの急増) |
+| App Check トークンの再利用 | ログの一致 | トークンが 2 回目に使われた | 最初の 1 件 | CRITICAL | [App Check トークンの再利用](#app-check-トークンの再利用) |
+| 権限やアカウントの変更 | ログの一致 | `authz_change` や `user_deleted` などの監査イベント | 最初の 1 件 | WARNING | [権限やアカウントの変更](#権限やアカウントの変更) |
+| 関数のタイムアウト | 指標 | タイムアウトのガードが打ち切った実行が N 回を超えた | 10 分間に 3 回 | WARNING | [サーバーエラーとタイムアウトと LLM の問題](#サーバーエラーとタイムアウトと-llm-の問題) |
+| LLM の回答が切れた・差し控えられた・中断された | 指標 | 3 つのいずれかが N 回を超えた | 10 分間に 5 回 | WARNING | [サーバーエラーとタイムアウトと LLM の問題](#サーバーエラーとタイムアウトと-llm-の問題) |
+| Firebase Security Rules の変更 | ログの一致 | ルールセットまたはリリースが作成・更新・削除された | 最初の 1 件 | ERROR | [Firebase Security Rules の変更](#firebase-security-rules-の変更) |
+| IAM ポリシーの変更 | ログの一致 | いずれかの `SetIamPolicy` | 最初の 1 件 | ERROR | [IAM ポリシーの変更](#iam-ポリシーの変更) |
+| サービスアカウントキーの作成 | ログの一致 | キーが作られた、またはアップロードされた | 最初の 1 件 | ERROR | [サービスアカウントキーの作成](#サービスアカウントキーの作成) |
+| Firebase プロジェクトや API キーの変更 | ログの一致 | Firebase Management か API Keys API が書き込んだ | 最初の 1 件 | WARNING | [Firebase プロジェクトや API キーの変更](#firebase-プロジェクトや-api-キーの変更) |
+
+ログの一致は、通知が 5 分間に最大 1 回です。しきい値は出発点です。`--threshold errors=10` で変えられます（[チューニング](#チューニング)を参照）。
 
 ### コンソールで手作業で
 
@@ -2002,20 +2047,33 @@ npx resultlog monitoring --project my-project \
 
 ### プロジェクト自体への変更
 
-Google Cloud は、誰かがプロジェクトを変更するたびに、管理アクティビティ監査ログのエントリを書きます。Security Rules をデプロイした、IAM ポリシーを設定した、サービスアカウントキーを作った、Firebase のアプリを追加した、API キーを編集した、といった操作です。このエントリは**常に書かれ、設定・除外・無効化ができず**、無料です。つまり記録のために、あなたがすることも、関数に足すものもありません。ひとりでに起きないのは通知です。アラートがない限り、Cloud Logging は誰にも知らせません。`resultlog monitoring` は、そのためのログベースのアラートを 4 つ書き出します（コンソールのレシピと同じフィルタなので、手作業でも作れます）。
+Google Cloud は、誰かがプロジェクトを変更するたびに、管理アクティビティ監査ログのエントリを書きます。Security Rules をデプロイした、IAM ポリシーを設定した、サービスアカウントキーを作った、Firebase のアプリを追加した、API キーを編集した、といった操作です。このエントリは**常に書かれ、設定・除外・無効化ができず**（[Cloud Audit Logs](https://docs.cloud.google.com/logging/docs/audit)）、`_Required` バケットに 400 日保持され（[割り当てと上限](https://docs.cloud.google.com/logging/quotas)）、そのバケットには保存料も保持料もかかりません（[料金](https://cloud.google.com/monitoring/pricing)）。つまり記録のために、あなたがすることも、関数に足すものもありません。ひとりでに起きないのは通知です。アラートがない限り、Cloud Logging は誰にも知らせません。`resultlog monitoring` は、そのためのログベースのアラートを 4 つ書き出します（コンソールのレシピと同じフィルタなので、手作業でも作れます）。
 
 | アラート | 反応するもの | なぜ大事か |
 |---|---|---|
-| Firebase Security Rules の変更 | `firebaserules.googleapis.com` の `CreateRuleset`、`CreateRelease`、`UpdateRelease`、`DeleteRelease`、`DeleteRuleset` | ルールは、データとそれ以外の全員の間に立つものです。ルールが開いていると、データが漏れます |
+| Firebase Security Rules の変更 | `firebaserules.googleapis.com` の `CreateRuleset`、`CreateRelease`、`UpdateRelease`、`DeleteRelease`、`DeleteRuleset`（[メソッド](https://firebase.google.com/support/guides/cloud-audit-logging/firebase-rules)） | ルールは、データとそれ以外の全員の間に立つものです。ルールが開いていると、データが漏れます |
 | IAM ポリシーの変更 | すべての `SetIamPolicy`: プロジェクト、サービスアカウント（`google.iam.admin.v1.SetIAMPolicy`）、公開された関数、その他のリソース | 誰が何をできるか、誰になりすませるか |
-| サービスアカウントキーの作成 | `iam.googleapis.com` の `CreateServiceAccountKey` と `UploadServiceAccountKey` | キーは、期限のない、ファイルになったパスワードです |
-| Firebase プロジェクトや API キーの変更 | `firebase.googleapis.com`（アプリ、SHA 証明書、プロジェクト）と `apikeys.googleapis.com`（API キーは Firebase ではなく API Keys API のものです）が書くすべて | 見覚えのないアプリや、制限を外したキーは、バックエンドを呼べる相手を広げます |
+| サービスアカウントキーの作成 | `iam.googleapis.com` の `CreateServiceAccountKey` と `UploadServiceAccountKey`（[メソッド](https://docs.cloud.google.com/iam/docs/audit-logging)） | キーは、期限のない、ファイルになったパスワードです |
+| Firebase プロジェクトや API キーの変更 | `firebase.googleapis.com`（アプリ、SHA 証明書、プロジェクト。[メソッド](https://firebase.google.com/support/guides/cloud-audit-logging/firebase-management)）と `apikeys.googleapis.com`（API キーは Firebase ではなく API Keys API のものです。[メソッド](https://docs.cloud.google.com/api-keys/docs/audit-logging)）が書くすべて | 見覚えのないアプリや、制限を外したキーは、バックエンドを呼べる相手を広げます |
 
 - どれも、通知は 5 分間に最大 1 回です。ドキュメントには、誰が・どこからやったかを表示する `gcloud logging read` コマンド（`protoPayload.authenticationInfo.principalEmail`、`protoPayload.requestMetadata.callerIp`）が書かれています。
 - **自分たちの作業でも反応します。** ルールのデプロイは、ルールの変更です。こうしたアラートはそれが目的で、あなたは自分だったかを確かめます。ルールを 1 日に何度もデプロイするチームで、他の人の操作にだけ反応させたいなら、プリンシパルでフィルタを絞ってください（`AND NOT protoPayload.authenticationInfo.principalEmail:"ci@"` など）。
-- `:` は大文字小文字を区別せず、値の一部に一致します。`SetIamPolicy` がサービスアカウントの `google.iam.admin.v1.SetIAMPolicy` にも当たるのはそのためです。完全一致の `="SetIamPolicy"` では、プロジェクトの分しか見えません。
-- 見えるのは**変更**で、読み取りではありません。キーの値やプロジェクトの設定を読む操作はデータアクセス監査ログで、既定では無効で、量も大きくなりえます。
+- `:` は大文字小文字を区別せず、値の一部に一致します（[クエリ言語](https://docs.cloud.google.com/logging/docs/view/logging-query-language)）。`SetIamPolicy` がサービスアカウントの `google.iam.admin.v1.SetIAMPolicy` にも当たるのはそのためです（[IAM の監査ログ](https://docs.cloud.google.com/iam/docs/audit-logging)）。完全一致の `="SetIamPolicy"` では、プロジェクトの分しか見えません。
+- 見えるのは**変更**で、読み取りではありません。キーの値やプロジェクトの設定を読む操作はデータアクセス監査ログで、[既定では無効](https://docs.cloud.google.com/logging/docs/audit/configure-data-access)（一部の BigQuery サービスを除く）で、量も大きくなりえます。
 - `--service` と `--prefix` は関数のアラートに効きます。この 4 つはプロジェクト全体を見ます。必要なものだけを適用してください。アラートは `alerts/` の下に 1 つずつのファイルです。
+- **見えないもの。** Cloud Run サービスの Invoker IAM チェックを切ると、IAM ポリシーを変えずに公開できてしまうので、IAM のアラートは静かなままです。塞ぎ方は [IAM ポリシーの変更](#iam-ポリシーの変更)にあります。このプロジェクトの外（フォルダや組織のポリシー）での変更は、そのフォルダや組織のログにあります。
+
+### ロールと通知チャネル
+
+**ファイルを適用できる人。** 合うなかで最も狭いロールを、個人ではなくグループに付けます（[IAM によるアクセス制御](https://docs.cloud.google.com/monitoring/access-control)）。アラートポリシーには `roles/monitoring.alertPolicyEditor`、通知チャネルには `roles/monitoring.notificationChannelEditor` です。ログベース指標の作成には `roles/logging.configWriter` が要ります（[IAM によるアクセス制御（Logging）](https://docs.cloud.google.com/logging/docs/access-control)）。この用途に `roles/monitoring.editor`、`roles/monitoring.admin`、基本ロールの Owner と Editor は避けてください。アラートのエントリを読む人には、`_Required` バケットを含む `roles/logging.viewer` と、データアクセスログ用の `roles/logging.privateLogViewer` が要ります（同じページ）。
+
+**どのチャネルか。**（[通知チャネルの作成と管理](https://docs.cloud.google.com/monitoring/support/notification-options)）
+
+- 複数の種類を使ってください。モバイルアプリ、PagerDuty、Webhook、Slack は同じ内部サービスに頼っているので、予備にメールか Pub/Sub を組み合わせます。
+- 動くべき人で選び、今すぐ人が要るアラート（再利用されたトークン、サービスアカウントキー、Security Rules、IAM）は、誰かが見ているチャネルに送ってください。[OWASP](https://top10.owasp.org/2025/A09_2025-Security_Logging_and_Alerting_Failures) は、アラートは人に届き、妥当な時間内に確認されなければならないと述べています。
+- 通知には機微なデータが含まれることがあるので、チャットルームに送る前にデータの扱いを見直してください。メールはチャネルごとに 1 アドレスで、グループのアドレスはアラートの送信元からのメールを受け付ける必要があります。
+- 自動化（チケットやボット）には Webhook か Pub/Sub を使ってください。ペイロードのスキーマが文書化されています。テキスト項目は形式が変わりうるので、解析しないでください。
+- チャネルは、条件を満たしやすい一時的なポリシーでテストし、通知チャネルのエラーは Logs Explorer で確認します。
 
 ### 適用
 
@@ -2031,13 +2089,181 @@ gcloud monitoring dashboards create --config-from-file dashboard.json
 
 コードからは `import { monitoring, files } from "resultlog/monitoring"` を使います。`monitoring(options)` は指標・アラート・ダッシュボードを普通のオブジェクトで返すので、Terraform、Pulumi、CDK でリソースを組み立てるのに使えます。`files(options)` はコマンドが書き出すファイルの一式を返します。
 
+### アラートのテスト
+
+- **フィルタは、適用する前に。** レシピを Logs Explorer で過去数週間に対して実行し、期待どおりに一致するかを見ます。**Create log alert** のウィザードにも、同じ確認ができる **Preview logs** があります（[ログベースのアラート](https://docs.cloud.google.com/logging/docs/alerting/log-based-alerts)）。
+- **チャネル。** 条件を満たしやすい一時的なポリシーを作り、通知が届くことを確かめます（[通知チャネル](https://docs.cloud.google.com/monitoring/support/notification-options)）。
+- **本物は、サンドボックスのプロジェクトで。** ルールを 1 回デプロイし、使い捨てのサービスアカウントキーを作って消し、無害な IAM バインディングを足して外し、それぞれのアラートと通知が届くことを確かめます。[Google も](https://docs.cloud.google.com/logging/docs/audit/best-practices)、監査ログの設定は本番の前にテスト用プロジェクトで試すよう勧めています。
+- **静かなのは、問題がない証拠ではありません。** ログが止まれば、アラートも止まります。[OWASP Logging Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html) は、ログが止まったことを検知する仕組みを求めています。ときどき Logs Explorer を見るか、いつもは必ずあるはずの指標のデータが途絶えたことにアラートを掛けてください（[アラートの概要](https://docs.cloud.google.com/monitoring/alerts)は、指標ベースのポリシーの条件に「データの欠落」を挙げています）。
+
+### チューニング
+
+無視されるアラートは、ないより悪く、ガイダンスもそう言っています。Google の SRE 本: 「すべてのページ（呼び出し）は対処可能であるべき」「機械的で定型の対応しか要らないページは、赤信号」、そしてページが多すぎると「担当者は疑い、読み飛ばし、さらには無視する」（原文は英語。[Monitoring Distributed Systems](https://sre.google/sre-book/monitoring-distributed-systems/)）。OWASP は、誤検知が多すぎると大事なアラートが埋もれると警告し（[A09:2025](https://top10.owasp.org/2025/A09_2025-Security_Logging_and_Alerting_Failures)）、Google の監査ログのガイダンスは、すぐに調べるべきイベントと優先度の低いものを分けることです（[Cloud Audit Logs のベストプラクティス](https://docs.cloud.google.com/logging/docs/audit/best-practices)）。実際には次のようにします。
+
+- 今すぐ人が要るアラートと、数えるだけのアラートは、別のチャネルに送ります。アラートは `alerts/` の下に 1 つずつのファイルなので、適用する前に、ファイルの `notificationChannels` を編集してください。
+- しきい値は、`--threshold errors=10` を付けて生成し直し、[適用](#適用)にあるとおりにポリシーを置き換えて変えます。
+- アラートが見張る変更を自分たちの CI が行うなら、黙らせるのではなくプリンシパルで絞ってください（`AND NOT protoPayload.authenticationInfo.principalEmail:"ci@"`）。ほかの人がその変更をしたときは、これまでどおり通知されます。
+- 予定された作業では、**スヌーズ**が、最大 16 個のポリシーの通知とアラートを一定期間止めます（[通知とアラートのスヌーズ](https://docs.cloud.google.com/monitoring/alerts/snooze)）。そのページには、スヌーズがログベースのポリシーにも効くかは書かれていないので、頼る前にテスト用のポリシーで試してください。
+
+### 費用と制限
+
+- **ログベース指標は課金されます。** Cloud Monitoring のカスタム指標の一種として扱われます（[ログベース指標](https://docs.cloud.google.com/logging/docs/logs-based-metrics)）。
+- **ラベルには上限があります。** 指標ごとに、ラベル 10 個、ラベル値 1,024 バイト、アクティブな時系列 30,000 本（過去 24 時間に書き込みがあったもの）。プロジェクトごとに指標ディスクリプタ 500 個。監視対象リソース 1 つあたりのアクティブな時系列が 1,000,000 本に達すると、スロットリングされます（[割り当てと上限](https://docs.cloud.google.com/logging/quotas)）。ラベルがイベントの種類とエラー名で、ID にならないのはそのためです。値ごとに時系列が増えます。
+- **管理アクティビティログ**は、保存料も保持料もかからない `_Required` バケットにあります（[料金](https://cloud.google.com/monitoring/pricing)）。**データアクセスログ**は既定で無効で、量が大きくなりえ、有効にすると課金が増えることがあります（[データアクセス監査ログの有効化](https://docs.cloud.google.com/logging/docs/audit/configure-data-access)）。
+- **ログベースのアラート**は、除外したログには働かず、数えることもできません（[ログベースのアラート](https://docs.cloud.google.com/logging/docs/alerting/log-based-alerts)）。
+
 ### 知っておくこと
 
 - **指標が数えるのはログのエントリです。** 失敗、セキュリティイベント、監査イベントは必ずログに出るので、その件数は完全です。通常の成功はサンプリングで間引かれることがあります（`successSampleRate`）。ダッシュボードのリクエストのグラフが Cloud Run 自身の指標を使うのはそのためです。
 - **ユーザー別・アドレス別は指標に入っていません。** それは digest で調べてください。
-- **費用。** ユーザー定義のログベース指標は Cloud Monitoring の料金で課金され、ラベルの値ごとに時系列が増えます。生成されるラベルはイベント名、エラー名、重大度です。ID を持つラベルは追加しないでください。
 - **第 2 世代の関数のみ対象です。** フィルタは `resource.type="cloud_run_revision"` を選びます。
 - **最初の実行を確認してください。** ファイルは Google の API リファレンスに従っていて、フィルタは、ライブラリが実際に書き出すエントリと、Google が文書化している管理アクティビティのエントリに対してテストしています。まず `dashboards create --validate-only` で検証し、最初の実行の出力を確認してください。Google の API がフィールドの調整を求めたら、ファイルは普通の JSON なので直せます。
+
+## アラートが出たときの対応
+
+アラートは調査の終わりではなく、始まりです。ここでは、[Cloud Monitoring のアラート](#アラートの全体像)や[digest の finding](#不正アクセスの検知)が届いたときにすることを書きます。標準規格と Google Cloud が言っていることに沿っていて、各項目の隣に出典を付けました。出典が言っているのではなく、ふつうの実践として書いた手順には、リンクを付けていません。全体を、自分たちの運用手順書の出発点として扱い、必要になる前に、自分たちにしか分からないことを埋めてください。誰に連絡するか、誰が IAM やルールを変えてよいか、その人にどう連絡するかです。
+
+### ガイダンスが言っていること
+
+- **アラートが来る前に、計画と手順書を用意する。** OWASP がログとアラートの不備への対策として挙げているのは、インシデント対応・復旧計画を作るか採用すること、そして検知にすばやく対応できるよう、アラートのユースケースと手順書を維持することです（[A09:2025](https://top10.owasp.org/2025/A09_2025-Security_Logging_and_Alerting_Failures)）。NIST のインシデント対応ガイド SP 800-61 Rev. 3（2025 年 4 月）は、組織がインシデント対応をサイバーセキュリティのリスク管理に組み込み、インシデントに備え、その数と影響を減らし、検知・対応・復旧を改善できるようにするものです（[NIST SP 800-61r3](https://csrc.nist.gov/pubs/sp/800/61/r3/final)）。
+- **証拠を守る。** ログは、改ざん、権限のないアクセス、削除から守られなければならず、読み取り権限は制限して見直し、ログが止まったことは検知できるようにします（[OWASP Logging Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html)）。
+- **最小権限と多要素認証が、緩和策です。** MITRE ATT&CK が、アラートのうち 2 つの背後にある手口に挙げている緩和策です。クラウドアカウントへの認証情報の追加（GCP のサービスアカウントキーが例に挙がっています。[T1098.001 Additional Cloud Credentials](https://attack.mitre.org/techniques/T1098/001/)）と、ロールの追加（[T1098.003 Additional Cloud Roles](https://attack.mitre.org/techniques/T1098/003/)）です。検知についての助言は、これらのアラートがしていることそのものです。見慣れないプリンシパルによるキーの作成と、通常のパターンや時間帯から外れたロールの付与を見張ります。
+
+### 最初の 10 分
+
+どのアラートでも、この順で進めます。
+
+1. **アラートのドキュメントを読む。** ポリシーのドキュメントは通知に載ります（[アラートの概要](https://docs.cloud.google.com/monitoring/alerts)）。ここでは、アラートの意味とすることが書かれていて、プロジェクトのアラートには、誰がやったかを表示する `gcloud logging read` コマンドも入っています。
+2. **エントリを開き**、誰が・何を・どこから・いつを答える。管理アクティビティのエントリでは `protoPayload.authenticationInfo.principalEmail`、`protoPayload.methodName`、`protoPayload.resourceName`、`protoPayload.requestMetadata.callerIp`。関数のエントリでは `actor.uid`、`actor.ip`、`errorName`、`fingerprint` です。
+3. **予期されたものか。** デプロイや CI の実行と照らします。本人かパイプラインの持ち主に、アラートを運んだチャネルとは別の経路で尋ねます。
+4. **範囲を広げて見る。** そのプリンシパルやアドレスは、ここ数日、ほかに何をしたか。クエリは[証拠と記録](#証拠と記録)にあります。管理アクティビティが示すのは変更です。盗まれた認証情報が読んだものはデータアクセスログにあり、それは[既定で無効](https://docs.cloud.google.com/logging/docs/audit/configure-data-access)なので、そこが静かでも何の証明にもなりません。
+5. **変える前に記録を残す。** バインディングを外す、キーを消す、は正しい行動ですが、先にエントリをエクスポートしてください。
+6. **判断する。** 予期されたもの: 記録しておき、また起きるならアラートを絞ります。説明がつかないもの: 封じ込め（下記）をしながら調べ続けます。確定したもの: インシデントです。計画が言う相手に知らせ、見たことと行ったことの時系列を残し、証拠を保全します。
+
+### アラートごとの対応
+
+#### Firebase Security Rules の変更
+
+自分たちのデプロイかもしれません。そうでないなら、誰かがルールを緩めたのかもしれず、探すパターンは Firebase が安全でないとしているものです。全員に開いたアクセス（`if true`）と、サインインしている人なら誰でもできるアクセス（`auth != null`）です（[Avoid insecure rules](https://firebase.google.com/docs/rules/insecure-rules)）。
+
+- **見る**のは `methodName`（ルールセットがアップロードされた、リリースがそれを有効にした、削除された）、`principalEmail`、`callerIp` です。ルールセットは不変で、リリースがどれが有効かを示します。Admin SDK と REST API で一覧でき、有効なソースをバージョン管理と比べられます（[Manage and deploy Firebase Security Rules](https://firebase.google.com/docs/rules/manage-deploy)）。
+- **封じ込める**には、バージョン管理にある最後の正しいルールをデプロイします（`firebase deploy --only firestore:rules`。`storage`、`database` も同様）。CLI からのデプロイは、コンソールで設定したルールを上書きします（同じページ）。
+- **影響を見積もる**。ルールが開いている間に、何が読み書きされたか。データの読み書きはデータアクセス監査ログで、既定では無効です。関数のエントリと `sensitive_read` の監査イベントが示すのは、関数を通ったものだけです。機微なサービスのデータアクセスログは、次のインシデントより前に決めておいてください（[Cloud Audit Logs のベストプラクティス](https://docs.cloud.google.com/logging/docs/audit/best-practices)）。
+- **予防する**には、ルールをバージョン管理に置き、それだけを行うサービスアカウントで CI からデプロイし、出す前にエミュレータでテストし、編集は CLI かコンソールのどちらか一方だけにします（[Avoid insecure rules](https://firebase.google.com/docs/rules/insecure-rules)）。
+
+#### IAM ポリシーの変更
+
+メンバーの追加、ロールの変更、関数の公開は、どれも `SetIamPolicy` として届きます。MITRE ATT&CK は、クラウドアカウントにロールを足してアクセスを維持・拡大することを、永続化と権限昇格の手口として説明しています（[T1098.003](https://attack.mitre.org/techniques/T1098/003/)）。
+
+- **見る**のは、誰がどのロールを何に対して得たか: `protoPayload.resourceName` と、`protoPayload.request`、`protoPayload.response` にあるポリシーです。特に重要な付与は、何かに対する `allUsers` や `allAuthenticatedUsers`、プロジェクトの Owner や Editor、プリンシパルがサービスアカウントとして振る舞えるようになるロールです。
+- **封じ込める**には、バインディングを外します。実行した人が自分たちの側でないなら、その人のアカウントとキーも無効にします（次のアラートを参照）。
+
+  ```bash
+  gcloud projects remove-iam-policy-binding PROJECT_ID --member=PRINCIPAL --role=ROLE
+  gcloud functions remove-invoker-policy-binding NAME --region=REGION --member=allUsers   # 公開された第 2 世代の関数
+  gcloud run services remove-iam-policy-binding SERVICE --region=REGION --member=allUsers --role=roles/run.invoker
+  ```
+
+- **Cloud Run には、公開にするもう 1 つの入口があります。** サービスは、`allUsers` が `roles/run.invoker` を持っていれば公開で、Invoker IAM チェックを切って（`--no-invoker-iam-check`）も公開になります。後者はサービスの更新で、IAM ポリシーの変更ではないので、このアラートには見えません。ドメイン制限共有のもとでは `allUsers` への付与が失敗し、そのページはチェックを切るよう案内しています。もう 1 つの入口が重要なのはそのためです。`constraints/run.managed.requireInvokerIam` で、チェックを切れる人を制限できます。既定では適用されていません（[Allowing public (unauthenticated) access](https://docs.cloud.google.com/run/docs/authenticating/public)）。
+- **予防する**には、最小権限にし、IAM を変えられるアカウントを少なくします。MITRE が挙げる緩和策は、特権アカウントへの多要素認証、最小権限、権限の低いアカウントに IAM ポリシーを変えさせないことです（[T1098.003](https://attack.mitre.org/techniques/T1098/003/)）。
+
+#### サービスアカウントキーの作成
+
+サービスアカウントキーは、ファイルになった長期の認証情報です。MITRE ATT&CK は、クラウドアカウントにキーを足すことを永続化の手口に挙げ、GCP の例として `gcloud iam service-accounts keys create` を示しています（[T1098.001](https://attack.mitre.org/techniques/T1098/001/)）。Google はキーを例外として扱い、できるときはより安全な代替手段を使うよう言っています（[Best practices for managing service account keys](https://docs.cloud.google.com/iam/docs/best-practices-for-managing-service-account-keys)）。
+
+- **見る**のは、どのサービスアカウントか（`protoPayload.resourceName`）、誰がキーを作ったか（`principalEmail`）、どこからか（`callerIp`）、自分たちのパイプラインが持ち主か。Google は、キーが最後に使われた時期を見る手段として、Key Authentication Events 指標とサービスアカウントのインサイトを挙げています（同じページ）。
+- **封じ込める**には、キーを無効にしてから削除します。Google は、漏れたキーは「できるだけ早く」削除するよう言い、リポジトリから消すだけでは足りないとしています（同じページ）。キーが自分たちのものでないなら、サービスアカウントも止めます。
+
+  ```bash
+  gcloud iam service-accounts keys disable KEY_ID --iam-account=SERVICE_ACCOUNT_EMAIL
+  gcloud iam service-accounts keys delete KEY_ID --iam-account=SERVICE_ACCOUNT_EMAIL
+  gcloud iam service-accounts disable SERVICE_ACCOUNT_EMAIL
+  ```
+
+- **復旧する**には、そのアカウントが届く範囲のすべてを、漏れたものとして扱い、その秘密情報をローテーションします。キーが作られてからそのアカウントが何をしたかも見ます。`principalEmail` がそのアカウントの管理アクティビティのエントリです。より安全な代替手段がないときにだけ、新しいキーを作ります。
+- **予防する**には、組織ポリシーの制約「Disable service account key creation」（`iam.disableServiceAccountKeyCreation`、管理型の `iam.managed.disableServiceAccountKeyCreation`）と「Disable service account key upload」（`iam.disableServiceAccountKeyUpload`、`iam.managed.disableServiceAccountKeyUpload`）を使います。2024 年 5 月 3 日以降に作られた組織では、既定で適用されています。`iam.serviceAccountKeyExposureResponse` は、Google が漏えいを見つけたキーを無効にする制約で、2024 年 6 月 16 日以降の既定は `DISABLE_KEY` です（[Restrict IAM service account usage](https://docs.cloud.google.com/resource-manager/docs/organization-policy/restricting-service-accounts)）。キーはソース管理に入れず、スキャンで探します（上記のベストプラクティスのページ）。
+
+#### Firebase プロジェクトや API キーの変更
+
+- **見る**のは `serviceName` です。`apikeys.googleapis.com` は、キーの作成・更新・削除です。`firebase.googleapis.com` は、プロジェクトかアプリ（新しい Web・Android・iOS アプリ、SHA 証明書）です。どのキーで、どんな制限が付いていたか。
+- **Firebase の API キーが何かを思い出す。** キーは、Firebase のサービスに対して、あなたのプロジェクトとアプリを識別するだけです。認可は IAM、Security Rules、App Check から来るので、Firebase のサービスに制限したキーは、秘密にしなくても構いません（[Learn about and manage API keys for Firebase](https://firebase.google.com/docs/projects/api-keys)）。つまり問うべきは「キーを見られたか」より、「制限が外れていないか、別の API が足されていないか（公開されるキーに Generative Language API を入れてはいけません）、Rules と App Check が持ちこたえているか」です。
+- **封じ込める**には、制限を元に戻すか、見覚えのないキーやアプリを削除します。使用中のキーを消すと、それを使う呼び出しが失敗するので、キーを入れ替えるなら、新しく制限付きのキーを作り、配布してから、古いキーを削除します（上記の Firebase のページ。[Best practices for managing API keys](https://docs.cloud.google.com/docs/authentication/api-keys-best-practices)）。
+
+  ```bash
+  gcloud services api-keys list
+  gcloud services api-keys update KEY_ID --api-target=service=SERVICE_NAME   # アプリが使う API ごとに繰り返す
+  gcloud services api-keys delete KEY_ID
+  ```
+
+- **予防する**には、App Check を強制し（機微な callable ではリプレイ防止も）、キーをアプリが使う API だけに制限し、Maps のような Firebase 以外の API には別の制限付きキーを使い、使わないキーを削除し、定期的にローテーションします（上記の 2 つのページ）。
+
+#### App Check トークンの再利用
+
+消費されたトークンが戻ってきました。「トークンが消費されると、再び使うことはできない」（[Enable App Check enforcement for Cloud Functions](https://firebase.google.com/docs/app-check/cloud-functions)。原文は英語）ので、記録されたリクエストがリプレイされています。resultlog はこれを記録します（`authn_token_reuse`、CRITICAL）。拒否するのは、エンドポイントの `consumeAppCheckToken: true` です。
+
+- **見る**のは `actor.appId`、`actor.ip`、`actor.uid` と、頻度です。digest の `token-reuse` ルールがまとめます。
+- **封じ込める**には、その callable で `enforceAppCheck` と `consumeAppCheckToken: true` を、まだなら有効にします。リプレイ防止はベータで、Node.js 用の Cloud Functions SDK だけが対応し、トークン検証にネットワークの往復が 1 回増え、クライアントには 1 回限り有効なトークンを要求させる必要があります（同じページ）。送信元のアドレスは、[何か見つかったら](#何か見つかったら)にあるとおり、エッジで短時間ブロックします。リプレイにユーザーの身元が付いているなら、そのアカウントを危険な状態として扱います（次のアラート）。
+
+#### 権限やアカウントの変更
+
+これは resultlog 自身の監査イベント（`authz_change`、`user_created`、`user_deleted` など）で、管理上の変更が行われたときに、あなたのコードが actor 付きで書きます。
+
+- **見る**のは、`actor.uid` が、想定している管理者（`resultlog digest --admins`）に当たるか、そして `target` です。その管理者に、別の経路で確認します。
+- **封じ込める**には、変更を元に戻します。管理者のセッションやアカウントが危険かもしれないなら、リフレッシュトークンを失効させ、アカウントを無効にします。
+
+  ```ts
+  import { getAuth } from "firebase-admin/auth";
+
+  const uid = "u9";
+  await getAuth().revokeRefreshTokens(uid);
+  await getAuth().updateUser(uid, { disabled: true });
+  ```
+
+  すでに発行された ID トークンは、有効期限（約 1 時間）まで有効なままです。`verifyIdToken(token, true)` で検証すれば失効が分かりますが、ネットワークの往復が 1 回増えます（[Manage User Sessions](https://firebase.google.com/docs/auth/admin/manage-sessions)）。
+- **予防する**には、管理者への多要素認証と、ロール変更の承認です。MITRE は、どちらも緩和策に挙げています（[T1098.003](https://attack.mitre.org/techniques/T1098/003/)）。
+
+#### セキュリティイベントの急増
+
+拒否された呼び出しや拒否された入力が多い、または 1 つのアドレスが多数のアカウントを試している。digest の finding が、actor を示します（`authz-probing`、`validation-fuzzing`、`many-accounts-one-ip` など。[不正アクセスの検知](#不正アクセスの検知)を参照）。封じ込めは[何か見つかったら](#何か見つかったら)のとおりです。アカウントを止め、エッジで短時間ブロックし、使われた穴を塞ぎます。
+
+#### サーバーエラーとタイムアウトと LLM の問題
+
+攻撃のような形でない限り、これらはセキュリティではなく信頼性の話です。その時間帯に `resultlog digest` を実行します。`fingerprint` ごとの失敗グループは、多いものから並び、失敗した外部呼び出しとパンくずも付きます。タイムアウトでは、`pending` の呼び出しは応答が来なかったもので、もう 1 つ確認するのは関数自身のタイムアウトです。LLM の問題では、`max_tokens`、プロンプト、プロバイダの状態を見ます。これらは `200` で届くので、エラーは起きていません。この種のアラートが鳴り続けるのに誰も何もしないなら、しきい値かチャネルを変えてください。「すべてのページは対処可能であるべき」だからです（[Monitoring Distributed Systems](https://sre.google/sre-book/monitoring-distributed-systems/)）。
+
+### 証拠と記録
+
+何かを変える前に、記録を残します。
+
+- **Google が保管してくれるもの。** 管理アクティビティのエントリは `_Required` バケットに 400 日残り、その期間は変えられません（[割り当てと上限](https://docs.cloud.google.com/logging/quotas)）。そのバケットには保存料も保持料もかかりません（[料金](https://cloud.google.com/monitoring/pricing)）。
+- **自分で管理するコピー。** シンクでエントリを自分のバケットに流します。保持期間は 1〜3650 日です。フォルダや組織をまたぐなら、集約シンクを使います（[Cloud Audit Logs のベストプラクティス](https://docs.cloud.google.com/logging/docs/audit/best-practices)）。バケットをロックすると改ざんされにくくなりますが、**ロックは元に戻せません**。すべてのエントリが保持期間を過ぎるまで、誰もバケットを削除できず、プロジェクトのリーエン（lien）が推奨されています。コンソールではバケットをロックできず、`gcloud logging buckets update … --locked` ならできます（[Configure log buckets](https://docs.cloud.google.com/logging/docs/buckets)）。コマンドは[管理アクティビティ監査ログと一緒に保管する](#管理アクティビティ監査ログと一緒に保管する)にあります。
+- **インシデントのエクスポート。** 保管できるファイルとして残します。
+
+  ```bash
+  gcloud logging read 'logName:"cloudaudit.googleapis.com%2Factivity" AND protoPayload.authenticationInfo.principalEmail="someone@example.com"' --freshness=7d --format=json > evidence-principal.json
+  gcloud logging read 'resource.type="cloud_run_revision" AND jsonPayload.actor.ip="203.0.113.5"' --freshness=7d --format=json > evidence-address.json
+  npx resultlog digest evidence-address.json --pseudonymize
+  ```
+
+  プロジェクトのアカウントが危険にさらされているかもしれないなら、ファイルはプロジェクトの外に保管します。
+- **データアクセスログは、前もって決めておくものです。** 既定では無効で（一部の BigQuery サービスを除く）、量が大きくなりえ、有効にすると課金が増えることがあります（[データアクセス監査ログの有効化](https://docs.cloud.google.com/logging/docs/audit/configure-data-access)）。インシデントの後に有効にしても、過去は戻りません。読むには `roles/logging.privateLogViewer` が要ります（[IAM によるアクセス制御（Logging）](https://docs.cloud.google.com/logging/docs/access-control)）。
+- **証拠に秘密情報を入れない。** パスワード、トークン、キー、セッション ID、機微な個人情報は、そもそもログに入れるべきではありません（[OWASP Logging Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html)）。resultlog はキーとパターンでマスクしますが、情報漏えい防止の仕組みではありません。[マスキング](#マスキング)を参照してください。
+
+### 事後の対応
+
+- 時系列を書きます。何がいつ見え、何を誰が行ったか、気づくまでにどれだけかかったか。
+- 何かを変えます。新しいアラートや、より絞ったアラート。そのこと自体を不可能にする組織ポリシー（キーの作成、公開アクセス）。手順書の 1 行。OWASP はアラートのユースケースと手順書の維持を求め（[A09:2025](https://top10.owasp.org/2025/A09_2025-Security_Logging_and_Alerting_Failures)）、NIST のガイドは検知・対応・復旧の改善を目指しています（[SP 800-61r3](https://csrc.nist.gov/pubs/sp/800/61/r3/final)）。
+- 漏れたかもしれないものは、読まれた形跡がなくてもローテーションします。
+- 自分たちのいつもの作業で何度もアラートが鳴るなら、プリンシパルで絞ります。考えなくてよいページなら、チケットにするか自動化します。「機械的で定型の対応しか要らないページは、赤信号」（原文は英語。[Monitoring Distributed Systems](https://sre.google/sre-book/monitoring-distributed-systems/)）。
+
+### このアラートの先
+
+ここのアラートには契約が要らず、4 つのプロジェクト変更と、あなたの関数を対象にします。管理された、組織全体の検知には、Security Command Center の Event Threat Detection（Premium ティア）があります。Cloud Audit Logs をほぼリアルタイムで読み、IAM Anomalous Grant、Service Account Key Created、Dormant Service Account Key Created、Leaked Service Account Key Used などの finding を報告します（[Overview of Event Threat Detection](https://docs.cloud.google.com/security-command-center/docs/concepts-event-threat-detection-overview)）。有料のティアで、resultlog がそれに取って代わるものではありません。
+
+### 出典
+
+- **Google Cloud**: [アラートの概要](https://docs.cloud.google.com/monitoring/alerts)、[ログベースのアラート](https://docs.cloud.google.com/logging/docs/alerting/log-based-alerts)、[ログベース指標](https://docs.cloud.google.com/logging/docs/logs-based-metrics)、[通知チャネルの作成と管理](https://docs.cloud.google.com/monitoring/support/notification-options)、[通知とアラートのスヌーズ](https://docs.cloud.google.com/monitoring/alerts/snooze)、[IAM によるアクセス制御（Cloud Monitoring）](https://docs.cloud.google.com/monitoring/access-control)、[IAM によるアクセス制御（Cloud Logging）](https://docs.cloud.google.com/logging/docs/access-control)、[割り当てと上限](https://docs.cloud.google.com/logging/quotas)、[料金](https://cloud.google.com/monitoring/pricing)、[Cloud Audit Logs](https://docs.cloud.google.com/logging/docs/audit)、[Cloud Audit Logs のベストプラクティス](https://docs.cloud.google.com/logging/docs/audit/best-practices)、[データアクセス監査ログの有効化](https://docs.cloud.google.com/logging/docs/audit/configure-data-access)、[ログバケットの構成](https://docs.cloud.google.com/logging/docs/buckets)、[Logging クエリ言語](https://docs.cloud.google.com/logging/docs/view/logging-query-language)、[IAM の監査ログ](https://docs.cloud.google.com/iam/docs/audit-logging)、[API キーの監査ログ](https://docs.cloud.google.com/api-keys/docs/audit-logging)、[サービスアカウントキーの管理のベストプラクティス](https://docs.cloud.google.com/iam/docs/best-practices-for-managing-service-account-keys)、[IAM サービスアカウントの利用の制限](https://docs.cloud.google.com/resource-manager/docs/organization-policy/restricting-service-accounts)、[API キーの管理のベストプラクティス](https://docs.cloud.google.com/docs/authentication/api-keys-best-practices)、[公開（未認証）アクセスの許可](https://docs.cloud.google.com/run/docs/authenticating/public)、[Event Threat Detection の概要](https://docs.cloud.google.com/security-command-center/docs/concepts-event-threat-detection-overview)。
+- **Firebase**: [Firebase Security Rules の監査ログ](https://firebase.google.com/support/guides/cloud-audit-logging/firebase-rules)、[Firebase Management の監査ログ](https://firebase.google.com/support/guides/cloud-audit-logging/firebase-management)、[Avoid insecure rules](https://firebase.google.com/docs/rules/insecure-rules)、[Manage and deploy Firebase Security Rules](https://firebase.google.com/docs/rules/manage-deploy)、[Learn about and manage API keys for Firebase](https://firebase.google.com/docs/projects/api-keys)、[Manage User Sessions](https://firebase.google.com/docs/auth/admin/manage-sessions)、[Enable App Check enforcement for Cloud Functions](https://firebase.google.com/docs/app-check/cloud-functions)。
+- **セキュリティの実践**: [OWASP Top 10:2025, A09 Security Logging and Alerting Failures](https://top10.owasp.org/2025/A09_2025-Security_Logging_and_Alerting_Failures)、[OWASP Logging Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html)、[NIST SP 800-61 Rev. 3](https://csrc.nist.gov/pubs/sp/800/61/r3/final)、[MITRE ATT&CK T1098.001, Additional Cloud Credentials](https://attack.mitre.org/techniques/T1098/001/)、[T1098.003, Additional Cloud Roles](https://attack.mitre.org/techniques/T1098/003/)、[Google SRE book, Monitoring Distributed Systems](https://sre.google/sre-book/monitoring-distributed-systems/)。
 
 ## AI アシスタントと調べる
 

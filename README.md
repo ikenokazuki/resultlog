@@ -117,12 +117,33 @@ Projects that combine Firebase Functions with a Result type tend to rebuild the 
   - [When something is found](#when-something-is-found)
   - [What resultlog does not do](#what-resultlog-does-not-do)
 - [Cloud Monitoring](#cloud-monitoring)
+  - [How the alerts fit together](#how-the-alerts-fit-together)
   - [By hand, in the console](#by-hand-in-the-console)
   - [Or have the files written for you](#or-have-the-files-written-for-you)
   - [What you get](#what-you-get)
   - [Changes made to the project itself](#changes-made-to-the-project-itself)
+  - [Roles and notification channels](#roles-and-notification-channels)
   - [Applying it](#applying-it)
+  - [Testing the alerts](#testing-the-alerts)
+  - [Tuning, and keeping the alerts worth reading](#tuning-and-keeping-the-alerts-worth-reading)
+  - [Cost and limits](#cost-and-limits)
   - [Things to know](#things-to-know)
+- [Responding to an alert](#responding-to-an-alert)
+  - [What the guidance says](#what-the-guidance-says)
+  - [The first ten minutes](#the-first-ten-minutes)
+  - [Alert by alert](#alert-by-alert)
+    - [Firebase Security Rules changed](#firebase-security-rules-changed)
+    - [IAM policy changed](#iam-policy-changed)
+    - [Service account key created](#service-account-key-created)
+    - [Firebase project or API key changed](#firebase-project-or-api-key-changed)
+    - [App Check token replayed](#app-check-token-replayed)
+    - [Permissions or accounts changed](#permissions-or-accounts-changed)
+    - [Security events surge](#security-events-surge)
+    - [Server errors, timeouts and LLM problems](#server-errors-timeouts-and-llm-problems)
+  - [Evidence and records](#evidence-and-records)
+  - [After the incident](#after-the-incident)
+  - [Beyond these alerts](#beyond-these-alerts)
+  - [Sources](#sources)
 - [Investigating with an AI assistant](#investigating-with-an-ai-assistant)
 - [Log cost](#log-cost)
 - [Redaction](#redaction)
@@ -1818,7 +1839,7 @@ An audit entry:
 
 ### Keep your audit trail with the Admin Activity audit logs
 
-GCP already records administrative changes to your project, such as IAM policy changes, new service account keys and function deploys, as Admin Activity audit logs. They are always on, free, and kept for 400 days in the `_Required` bucket. To investigate an incident in one place, copy them into a bucket of their own, together with resultlog's audit and security entries:
+GCP already records administrative changes to your project, such as IAM policy changes, new service account keys and function deploys, as Admin Activity audit logs. They are always written ([Cloud Audit Logs](https://docs.cloud.google.com/logging/docs/audit)), kept for 400 days in the `_Required` bucket ([Quotas and limits](https://docs.cloud.google.com/logging/quotas)), with no storage or retention charge ([Pricing](https://cloud.google.com/monitoring/pricing)). To investigate an incident in one place, copy them into a bucket of their own, together with resultlog's audit and security entries:
 
 ```bash
 PROJECT_ID=your-project
@@ -1917,6 +1938,8 @@ const { data } = digest(logs, {
 
 ### When something is found
 
+For the alerts of [Cloud Monitoring](#cloud-monitoring), with the steps for each, see [Responding to an alert](#responding-to-an-alert).
+
 - **Stop the account.** Revoke its refresh tokens and, if needed, disable it, with the Admin SDK (`getAuth().revokeRefreshTokens(uid)`, `updateUser(uid, { disabled: true })`). An ID token that was already issued stays valid until it expires unless your code checks for revocation, so see Firebase's guidance on revoking sessions.
 - **Block briefly, and at the edge.** Attackers rarely reuse addresses in a distributed attack, so block for 15 minutes or less rather than for long (Datadog's guidance), in Cloud Armor or whatever sits in front of your functions, not in the function.
 - **Close what was used.** Fix the missing ownership check, turn on `enforceAppCheck` and replay protection, rotate any secret that could have been read.
@@ -1931,7 +1954,29 @@ const { data } = digest(logs, {
 
 ## Cloud Monitoring
 
-resultlog's entries are meant to be read and alerted on in Cloud Logging and Cloud Monitoring. You can set that up by hand in the console with the recipes below, or have `resultlog monitoring` write the setup as files.
+resultlog's entries are meant to be read and alerted on in Cloud Logging and Cloud Monitoring. You can set that up by hand in the console with the recipes below, or have `resultlog monitoring` write the setup as files. What to do when an alert reaches you is in [Responding to an alert](#responding-to-an-alert). Where this section and the next rely on Google Cloud, Firebase or a security standard, they link to the page; [Sources](#sources) lists them.
+
+### How the alerts fit together
+
+Cloud Monitoring has two kinds of alerting policy for this ([Alerting overview](https://docs.cloud.google.com/monitoring/alerts)). A **metric-based** policy evaluates the time series that Monitoring stores. A **log-based** policy evaluates log entries one by one. resultlog uses both, for different jobs:
+
+- **Events you count use a metric.** "More than 5 server errors in 5 minutes" needs a count, and a log-based alert can't count ([Log-based alerts](https://docs.cloud.google.com/logging/docs/alerting/log-based-alerts)). So resultlog turns the entries into [log-based metrics](https://docs.cloud.google.com/logging/docs/logs-based-metrics) and alerts on the metric. A metric counts only the entries received after it was created: it does not backfill.
+- **Rare, serious events use a log match.** A replayed App Check token or a new service account key should notify on the first one, so these alerts fire on the entry itself. Through the API a log-based policy can have only one condition, it needs a limit on how often it notifies, and it does not see logs that an exclusion filter drops (same page).
+
+| Alert | Kind | Fires when | Default | Severity | What to do |
+|---|---|---|---|---|---|
+| server errors | metric | more than N invocations of one function end in ERROR or worse | 5 in 5 min | ERROR | [Server errors, timeouts and LLM problems](#server-errors-timeouts-and-llm-problems) |
+| security events surge | metric | more than N security events of one kind | 20 in 5 min | WARNING | [Security events surge](#security-events-surge) |
+| App Check token replayed | log match | a token is used a second time | the first one | CRITICAL | [App Check token replayed](#app-check-token-replayed) |
+| permissions or accounts changed | log match | an audit event such as `authz_change` or `user_deleted` | the first one | WARNING | [Permissions or accounts changed](#permissions-or-accounts-changed) |
+| functions timing out | metric | the timeout guard cuts off more than N invocations | 3 in 10 min | WARNING | [Server errors, timeouts and LLM problems](#server-errors-timeouts-and-llm-problems) |
+| LLM answers cut off, withheld or interrupted | metric | more than N of any of the three | 5 in 10 min | WARNING | [Server errors, timeouts and LLM problems](#server-errors-timeouts-and-llm-problems) |
+| Firebase Security Rules changed | log match | a ruleset or a release is created, updated or deleted | the first one | ERROR | [Firebase Security Rules changed](#firebase-security-rules-changed) |
+| IAM policy changed | log match | any `SetIamPolicy` | the first one | ERROR | [IAM policy changed](#iam-policy-changed) |
+| service account key created | log match | a key is created or uploaded | the first one | ERROR | [Service account key created](#service-account-key-created) |
+| Firebase project or API key changed | log match | Firebase Management or the API Keys API writes | the first one | WARNING | [Firebase project or API key changed](#firebase-project-or-api-key-changed) |
+
+A log match notifies at most once in 5 minutes. The thresholds are starting points: `--threshold errors=10` changes one (see [Tuning](#tuning-and-keeping-the-alerts-worth-reading)).
 
 ### By hand, in the console
 
@@ -2002,20 +2047,33 @@ Options: `--service checkout,on-order` covers only those functions (by Cloud Run
 
 ### Changes made to the project itself
 
-Google Cloud writes an Admin Activity audit log entry whenever someone changes the project: deploys Security Rules, sets an IAM policy, creates a service account key, adds a Firebase app or edits an API key. These entries are **always written, and can't be configured, excluded or switched off**, and they cost nothing, so recording them needs nothing from you and nothing in your functions. What does not happen by itself is a notification: Cloud Logging tells nobody until an alert exists. `resultlog monitoring` writes four log-based alerts for them (the same filters as in the console recipes above, so that you can also create them by hand):
+Google Cloud writes an Admin Activity audit log entry whenever someone changes the project: deploys Security Rules, sets an IAM policy, creates a service account key, adds a Firebase app or edits an API key. These entries are **always written, and can't be configured, excluded or switched off** ([Cloud Audit Logs](https://docs.cloud.google.com/logging/docs/audit)), they are kept for 400 days in the `_Required` bucket ([Quotas and limits](https://docs.cloud.google.com/logging/quotas)), and that bucket has no storage or retention charge ([Pricing](https://cloud.google.com/monitoring/pricing)). So recording them needs nothing from you and nothing in your functions. What does not happen by itself is a notification: Cloud Logging tells nobody until an alert exists. `resultlog monitoring` writes four log-based alerts for them (the same filters as in the console recipes above, so that you can also create them by hand):
 
 | Alert | Fires on | Why it matters |
 |---|---|---|
-| Firebase Security Rules changed | `CreateRuleset`, `CreateRelease`, `UpdateRelease`, `DeleteRelease`, `DeleteRuleset` of `firebaserules.googleapis.com` | the rules are what stands between your data and everyone else; open rules are how data leaks |
+| Firebase Security Rules changed | `CreateRuleset`, `CreateRelease`, `UpdateRelease`, `DeleteRelease`, `DeleteRuleset` of `firebaserules.googleapis.com` ([methods](https://firebase.google.com/support/guides/cloud-audit-logging/firebase-rules)) | the rules are what stands between your data and everyone else; open rules are how data leaks |
 | IAM policy changed | any `SetIamPolicy`: the project, a service account (`google.iam.admin.v1.SetIAMPolicy`), a function made public, and other resources | who can do what, or impersonate whom |
-| Service account key created | `CreateServiceAccountKey` and `UploadServiceAccountKey` of `iam.googleapis.com` | a key is a password in a file that does not expire |
-| Firebase project or API key changed | everything written by `firebase.googleapis.com` (apps, SHA certificates, the project) and `apikeys.googleapis.com` (API keys are the API Keys API's, not Firebase's) | a new app or a key without its restrictions widens who can call your backend |
+| Service account key created | `CreateServiceAccountKey` and `UploadServiceAccountKey` of `iam.googleapis.com` ([methods](https://docs.cloud.google.com/iam/docs/audit-logging)) | a key is a password in a file that does not expire |
+| Firebase project or API key changed | everything written by `firebase.googleapis.com` (apps, SHA certificates, the project; [methods](https://firebase.google.com/support/guides/cloud-audit-logging/firebase-management)) and `apikeys.googleapis.com` (API keys are the API Keys API's, not Firebase's; [methods](https://docs.cloud.google.com/api-keys/docs/audit-logging)) | a new app or a key without its restrictions widens who can call your backend |
 
 - Each notifies at most once in 5 minutes and names, in its documentation, the `gcloud logging read` command that shows who did it and from where (`protoPayload.authenticationInfo.principalEmail`, `protoPayload.requestMetadata.callerIp`).
 - **They also fire on your own work.** A deploy of your rules is a rules change. That is the point of an alert like this: you check that it was you. If a team deploys rules many times a day and wants the alert only for other people, narrow the filter by the principal (`AND NOT protoPayload.authenticationInfo.principalEmail:"ci@"` and so on).
-- `:` ignores case and matches a part of the value. That is why `SetIamPolicy` also catches the service account variant `google.iam.admin.v1.SetIAMPolicy`; an exact `="SetIamPolicy"` would see only the project's.
-- They see **changes**, not reads. Reading a key's value or a project's configuration is a Data Access audit log, which is off by default and can grow large.
+- `:` ignores case and matches a part of the value ([query language](https://docs.cloud.google.com/logging/docs/view/logging-query-language)). That is why `SetIamPolicy` also catches the service account variant `google.iam.admin.v1.SetIAMPolicy` ([IAM audit logging](https://docs.cloud.google.com/iam/docs/audit-logging)); an exact `="SetIamPolicy"` would see only the project's.
+- They see **changes**, not reads. Reading a key's value or a project's configuration is a Data Access audit log, which is [disabled by default](https://docs.cloud.google.com/logging/docs/audit/configure-data-access) (apart from some BigQuery services) and can be large.
 - `--service` and `--prefix` apply to the function alerts; these four look at the whole project. Apply only the ones you want: each alert is its own file under `alerts/`.
+- **What they do not see.** Turning off the Invoker IAM check of a Cloud Run service makes it public without any IAM policy change, so the IAM alert stays quiet; see [IAM policy changed](#iam-policy-changed) for how to close that. Changes made outside this project (a folder or an organization policy) are in the logs of that folder or organization.
+
+### Roles and notification channels
+
+**Who can apply the files.** Grant the narrowest roles that fit, to a group rather than to people ([Control access with IAM](https://docs.cloud.google.com/monitoring/access-control)): `roles/monitoring.alertPolicyEditor` for the alerting policies and `roles/monitoring.notificationChannelEditor` for the channels. Creating the log-based metrics takes `roles/logging.configWriter` ([Access control with IAM](https://docs.cloud.google.com/logging/docs/access-control)). Avoid `roles/monitoring.editor`, `roles/monitoring.admin` and the basic Owner and Editor roles for this. Whoever reads the alert entries needs `roles/logging.viewer`, which covers the `_Required` bucket, and `roles/logging.privateLogViewer` for Data Access logs (same page).
+
+**Which channels.** ([Create and manage notification channels](https://docs.cloud.google.com/monitoring/support/notification-options))
+
+- Use more than one kind. The mobile app, PagerDuty, webhooks and Slack rely on the same internal service, so pair them with email or Pub/Sub as a backup.
+- Choose them by who must act, and send the alerts that need a human now (the replayed token, the service account key, Security Rules, IAM) to a channel that someone watches. [OWASP](https://top10.owasp.org/2025/A09_2025-Security_Logging_and_Alerting_Failures) says that alerts must reach people and be reviewed by them in a reasonable time.
+- A notification may contain sensitive data, so review your data handling before you send it to a chat room. Email goes to one address per channel; a group address must accept mail from the alerting sender.
+- For automation (a ticket, a bot), use a webhook or Pub/Sub: their payload has a documented schema, and the text fields may change format, so don't parse them.
+- Test a channel with a temporary policy whose condition is easy to meet, and look in Logs Explorer for notification channel errors.
 
 ### Applying it
 
@@ -2031,13 +2089,181 @@ gcloud monitoring dashboards create --config-from-file dashboard.json
 
 From code, `import { monitoring, files } from "resultlog/monitoring"`: `monitoring(options)` returns the metrics, alerts and dashboard as plain objects, so a Terraform, Pulumi or CDK setup can build its resources from them, and `files(options)` returns the file set the command writes.
 
+### Testing the alerts
+
+- **The filter, before you apply it.** Run a recipe in Logs Explorer over the last weeks and see whether it matches what you expect. The **Create log alert** wizard has **Preview logs** for the same check ([Log-based alerts](https://docs.cloud.google.com/logging/docs/alerting/log-based-alerts)).
+- **The channel.** Create a temporary policy whose condition is easy to meet, and see that the notification arrives ([notification channels](https://docs.cloud.google.com/monitoring/support/notification-options)).
+- **The real thing, in a sandbox project.** Deploy the rules once, create and delete a throwaway service account key, add and remove a harmless IAM binding, and see that each alert and its notification arrive. [Google advises](https://docs.cloud.google.com/logging/docs/audit/best-practices) testing audit log configuration in a test project before production.
+- **Silence is not proof.** If logging stops, so do the alerts. The [OWASP Logging Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html) asks for a process that detects whether logging has stopped. Look in Logs Explorer now and then, or alert on the absence of data from a metric that is normally always there (the [alerting overview](https://docs.cloud.google.com/monitoring/alerts) lists absence among the conditions a metric-based policy can have).
+
+### Tuning, and keeping the alerts worth reading
+
+An alert that is ignored is worse than none, and the guidance agrees. Google's SRE book: "Every page should be actionable", "Pages with rote, algorithmic responses should be a red flag", and when pages come too often "employees second-guess, skim, or even ignore incoming alerts" ([Monitoring Distributed Systems](https://sre.google/sre-book/monitoring-distributed-systems/)). OWASP warns that too many false positives bury the alerts that matter ([A09:2025](https://top10.owasp.org/2025/A09_2025-Security_Logging_and_Alerting_Failures)), and Google's audit log guidance is to separate the events that need immediate investigation from the low-priority ones ([Best practices for Cloud Audit Logs](https://docs.cloud.google.com/logging/docs/audit/best-practices)). In practice:
+
+- Send the alerts that need a human now, and the ones that are only counted, to different channels. Each alert is its own file under `alerts/`, so edit `notificationChannels` in the files before you apply them.
+- Change a threshold by generating again with `--threshold errors=10`, then replace the policy as described in [Applying it](#applying-it).
+- If your own CI makes a change that an alert watches, narrow that alert by principal (`AND NOT protoPayload.authenticationInfo.principalEmail:"ci@"`) rather than muting it, so that anyone else making the change still notifies.
+- For planned work, a **snooze** stops both the notifications and the alerts of up to 16 policies for a period ([Snooze notifications and alerts](https://docs.cloud.google.com/monitoring/alerts/snooze)). That page does not say whether a snooze covers log-based policies, so try it on a test policy before you rely on it.
+
+### Cost and limits
+
+- **Log-based metrics are chargeable**, as a class of Cloud Monitoring custom metrics ([Log-based metrics](https://docs.cloud.google.com/logging/docs/logs-based-metrics)).
+- **Labels are limited**: per metric 10 labels, 1,024 bytes per label value, and 30,000 active time series (written to within the last 24 hours); 500 metric descriptors per project; at 1,000,000 active time series for one monitored resource the system throttles ([Quotas and limits](https://docs.cloud.google.com/logging/quotas)). That is why the labels are event kinds and error names, and an id is never one: every distinct value is a time series.
+- **Admin Activity logs** sit in the `_Required` bucket with no storage or retention charge ([Pricing](https://cloud.google.com/monitoring/pricing)). **Data Access logs** are disabled by default, their volume can be large and enabling them might add charges ([Enable Data Access audit logs](https://docs.cloud.google.com/logging/docs/audit/configure-data-access)).
+- **Log-based alerts** don't operate on logs you excluded, and can't count ([Log-based alerts](https://docs.cloud.google.com/logging/docs/alerting/log-based-alerts)).
+
 ### Things to know
 
 - **The metrics count log entries.** Failures, security events and audit events are always logged, so their counts are complete. Ordinary successes can be sampled away (`successSampleRate`), which is why the request charts use Cloud Run's own metrics.
 - **Per user or per address is not in the metrics.** Run the digest for that.
-- **Cost.** User-defined log-based metrics are billed under Cloud Monitoring's pricing, and every distinct label value is a time series. The generated labels are event names, error names and severities. Add no label that holds an id.
 - **Second-generation functions only:** the filters select `resource.type="cloud_run_revision"`.
 - **Check the first run.** The files follow Google's API reference, and the filters are tested against the entries the library really writes and the Admin Activity entries Google documents. Start with `dashboards create --validate-only` and read the output of the first run: if Google's API asks for a field to be adjusted, the files are plain JSON.
+
+## Responding to an alert
+
+An alert is where an investigation starts, not where it ends. This is what to do when one of the [Cloud Monitoring alerts](#how-the-alerts-fit-together), or a [finding of the digest](#detecting-unauthorized-access), reaches you. It follows what the standards and Google Cloud say, with the source next to each point. A step that is plain practice rather than something a source says is written as a step, without a link. Treat the whole as the start of your own runbook, and fill in what only you know before you need it: who is called, who may change IAM and the rules, and how to reach them.
+
+### What the guidance says
+
+- **Have a plan and playbooks before the alert.** OWASP's advice against logging and alerting failures is to establish or adopt an incident response and recovery plan, and to maintain alerting use cases and playbooks so that detections can be acted on quickly ([A09:2025](https://top10.owasp.org/2025/A09_2025-Security_Logging_and_Alerting_Failures)). NIST's incident response guide, SP 800-61 Rev. 3 (April 2025), helps organizations build incident response into their cybersecurity risk management, to prepare for incidents, reduce their number and impact, and improve detection, response and recovery ([NIST SP 800-61r3](https://csrc.nist.gov/pubs/sp/800/61/r3/final)).
+- **Protect the evidence.** Logs must be protected from tampering, unauthorized access and deletion, read access should be restricted and reviewed, and logging that has stopped should be detected ([OWASP Logging Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html)).
+- **Least privilege and multi-factor authentication are the mitigations** that MITRE ATT&CK lists for the techniques behind two of the alerts: adding credentials to a cloud account, with GCP service account keys as an example ([T1098.001 Additional Cloud Credentials](https://attack.mitre.org/techniques/T1098/001/)), and adding roles to it ([T1098.003 Additional Cloud Roles](https://attack.mitre.org/techniques/T1098/003/)). Its detection advice is what these alerts do: watch for key creation by unusual principals, and for role grants outside normal patterns or hours.
+
+### The first ten minutes
+
+For any alert, in this order.
+
+1. **Read the alert's documentation.** A policy's documentation appears in its notifications ([Alerting overview](https://docs.cloud.google.com/monitoring/alerts)); here it says what the alert means and what to do, and, for the project alerts, holds the `gcloud logging read` command that shows who did it.
+2. **Open the entry**, and answer who, what, from where and when. In an Admin Activity entry: `protoPayload.authenticationInfo.principalEmail`, `protoPayload.methodName`, `protoPayload.resourceName` and `protoPayload.requestMetadata.callerIp`. In your functions' entries: `actor.uid`, `actor.ip`, `errorName` and `fingerprint`.
+3. **Was it expected?** Compare with your deploys and your CI runs. Ask the person, or the owner of the pipeline, through a channel other than the one that carried the alert.
+4. **Look wider.** What else did that principal or that address do in the last days? The queries are under [Evidence and records](#evidence-and-records). Admin Activity shows changes; what a stolen credential then read is in Data Access logs, which are [disabled by default](https://docs.cloud.google.com/logging/docs/audit/configure-data-access), so silence there proves nothing.
+5. **Keep the record before you change anything.** Removing a binding or deleting a key is right, but export the entries first.
+6. **Decide.** Expected: note it, and if it will come back, narrow the alert. Unexplained: contain it (below) and keep looking. Confirmed: it is an incident. Tell whoever your plan says to tell, keep a timeline of what you saw and did, and keep the evidence.
+
+### Alert by alert
+
+#### Firebase Security Rules changed
+
+It may be your own deploy. If it is not, someone may have loosened the rules, and the patterns to look for are the ones Firebase lists as insecure: open access (`if true`) and access for any signed-in user (`auth != null`) ([Avoid insecure rules](https://firebase.google.com/docs/rules/insecure-rules)).
+
+- **Look at** `methodName` (a ruleset was uploaded, a release made one live, or one was deleted), `principalEmail` and `callerIp`. Rulesets are immutable and a release says which one is live; the Admin SDK and the REST API list them, so you can compare the live source with version control ([Manage and deploy Firebase Security Rules](https://firebase.google.com/docs/rules/manage-deploy)).
+- **Contain** by deploying the last good rules from version control (`firebase deploy --only firestore:rules`, or `storage`, `database`). A deploy from the CLI overwrites the rules set in the console (same page).
+- **Assess** what could have been read or written while the rules were open. Reads and writes of your data are Data Access audit logs, which are off by default; your functions' entries and `sensitive_read` audit events show only what went through them. Decide on Data Access logs for the sensitive services before the next incident ([Best practices for Cloud Audit Logs](https://docs.cloud.google.com/logging/docs/audit/best-practices)).
+- **Prevent** by keeping the rules in version control and deploying them from CI with a service account that does only that, by testing them with the emulator before they ship, and by editing them one way only, the CLI or the console ([Avoid insecure rules](https://firebase.google.com/docs/rules/insecure-rules)).
+
+#### IAM policy changed
+
+Adding a member, changing a role and making a function public all arrive as `SetIamPolicy`. MITRE ATT&CK describes adding roles to a cloud account to keep or widen access as a persistence and privilege escalation technique ([T1098.003](https://attack.mitre.org/techniques/T1098/003/)).
+
+- **Look at** who got which role, on what: `protoPayload.resourceName`, and the policy in `protoPayload.request` and `protoPayload.response`. The grants that matter most are `allUsers` or `allAuthenticatedUsers` on anything, Owner or Editor on the project, and roles that let a principal act as a service account.
+- **Contain** by removing the binding. If the actor is not yours, also disable their account and keys (see the next alert).
+
+  ```bash
+  gcloud projects remove-iam-policy-binding PROJECT_ID --member=PRINCIPAL --role=ROLE
+  gcloud functions remove-invoker-policy-binding NAME --region=REGION --member=allUsers   # a 2nd gen function made public
+  gcloud run services remove-iam-policy-binding SERVICE --region=REGION --member=allUsers --role=roles/run.invoker
+  ```
+
+- **Cloud Run has a second door to the public.** A service is public if `allUsers` has `roles/run.invoker`, and also if its Invoker IAM check is turned off (`--no-invoker-iam-check`). The second is a service update, not an IAM policy change, so this alert does not see it. Under domain restricted sharing the `allUsers` grant fails, and the page's advice is to turn the check off instead, which is why the second door matters. `constraints/run.managed.requireInvokerIam` can restrict who may turn the check off; it is not enforced by default ([Allowing public (unauthenticated) access](https://docs.cloud.google.com/run/docs/authenticating/public)).
+- **Prevent** with least privilege and few accounts that may change IAM. MITRE's mitigations are multi-factor authentication for privileged accounts, least privilege, and keeping low-privileged accounts from changing IAM policies ([T1098.003](https://attack.mitre.org/techniques/T1098/003/)).
+
+#### Service account key created
+
+A service account key is a long-lived credential in a file. MITRE ATT&CK lists adding one to a cloud account as a persistence technique, with `gcloud iam service-accounts keys create` as its GCP example ([T1098.001](https://attack.mitre.org/techniques/T1098/001/)). Google treats keys as the exception: use a more secure alternative whenever you can ([Best practices for managing service account keys](https://docs.cloud.google.com/iam/docs/best-practices-for-managing-service-account-keys)).
+
+- **Look at** which service account (`protoPayload.resourceName`), who made the key (`principalEmail`), from where (`callerIp`), and whether one of your pipelines owns it. Google points to the Key Authentication Events metric to see when a key was last used, and to service account insights (same page).
+- **Contain** by disabling the key and then deleting it. Google says to delete a compromised key "as quickly as possible", and that removing it from a repository is not enough (same page). If the key is not yours, stop the service account as well.
+
+  ```bash
+  gcloud iam service-accounts keys disable KEY_ID --iam-account=SERVICE_ACCOUNT_EMAIL
+  gcloud iam service-accounts keys delete KEY_ID --iam-account=SERVICE_ACCOUNT_EMAIL
+  gcloud iam service-accounts disable SERVICE_ACCOUNT_EMAIL
+  ```
+
+- **Recover** by treating everything the account can reach as exposed, and rotating those secrets. Look at what the account did since the key was made: Admin Activity entries whose `principalEmail` is the account. Make a new key only if there is no more secure alternative.
+- **Prevent** with the organization policy constraints "Disable service account key creation" (`iam.disableServiceAccountKeyCreation`, or the managed `iam.managed.disableServiceAccountKeyCreation`) and "Disable service account key upload" (`iam.disableServiceAccountKeyUpload`, `iam.managed.disableServiceAccountKeyUpload`), enforced by default for organizations created on or after May 3, 2024. `iam.serviceAccountKeyExposureResponse` disables keys that Google finds exposed, and defaults to `DISABLE_KEY` since June 16, 2024 ([Restrict IAM service account usage](https://docs.cloud.google.com/resource-manager/docs/organization-policy/restricting-service-accounts)). Keep keys out of source control and scan for them (the best practices page above).
+
+#### Firebase project or API key changed
+
+- **Look at** `serviceName`. `apikeys.googleapis.com` is a key being created, updated or deleted. `firebase.googleapis.com` is the project or an app: a new web, Android or iOS app, or a SHA certificate. Which key, and which restrictions did it have?
+- **Remember what a Firebase API key is.** It only identifies your project and app to Firebase services. Authorization comes from IAM, Security Rules and App Check, and a key restricted to Firebase services does not need to be secret ([Learn about and manage API keys for Firebase](https://firebase.google.com/docs/projects/api-keys)). So the question is less "was the key seen" than "were its restrictions lifted, was a different API added (the Generative Language API must not be on a public key), and do Rules and App Check hold".
+- **Contain** by restoring the restrictions, or by deleting the key or app you do not know. Deleting a key that is in use breaks the calls that use it, so to replace a key, create a new restricted one, ship it, and then delete the old one (the Firebase page above; [Best practices for managing API keys](https://docs.cloud.google.com/docs/authentication/api-keys-best-practices)).
+
+  ```bash
+  gcloud services api-keys list
+  gcloud services api-keys update KEY_ID --api-target=service=SERVICE_NAME   # repeat for each API the app needs
+  gcloud services api-keys delete KEY_ID
+  ```
+
+- **Prevent** by enforcing App Check (and replay protection on the sensitive callables), restricting each key to the APIs the app needs, using a separate restricted key for non-Firebase APIs such as Maps, deleting keys you do not use, and rotating them periodically (both pages above).
+
+#### App Check token replayed
+
+A token that was consumed came back. "Once the token is consumed, it cannot be used again" ([Enable App Check enforcement for Cloud Functions](https://firebase.google.com/docs/app-check/cloud-functions)), so a recorded request is being replayed. resultlog records it (`authn_token_reuse`, CRITICAL); refusing it is the endpoint's `consumeAppCheckToken: true`.
+
+- **Look at** `actor.appId`, `actor.ip`, `actor.uid` and how often. The digest's `token-reuse` rule groups them.
+- **Contain** by turning on `enforceAppCheck` and `consumeAppCheckToken: true` on that callable, if they are not on. Replay protection is a beta, supports only the Cloud Functions SDK for Node.js, adds a network round trip to token verification, and needs the client to request limited-use tokens (same page). Block the source address briefly at the edge, as in [When something is found](#when-something-is-found). If the replay carries a user's identity, treat the account as at risk (the next alert).
+
+#### Permissions or accounts changed
+
+This is resultlog's own audit event (`authz_change`, `user_created`, `user_deleted` and so on), written by your code when an administrative change is made, with the actor.
+
+- **Look at** `actor.uid` against the administrators you expect (`resultlog digest --admins`), and at `target`. Confirm with that administrator through another channel.
+- **Contain** by reverting the change. If the administrator's session or account may be compromised, revoke their refresh tokens and disable the account:
+
+  ```ts
+  import { getAuth } from "firebase-admin/auth";
+
+  const uid = "u9";
+  await getAuth().revokeRefreshTokens(uid);
+  await getAuth().updateUser(uid, { disabled: true });
+  ```
+
+  An ID token that was already issued stays valid until it expires, about an hour, unless you verify tokens with `verifyIdToken(token, true)`, which adds a network round trip ([Manage User Sessions](https://firebase.google.com/docs/auth/admin/manage-sessions)).
+- **Prevent** with multi-factor authentication for administrators and approval for changes to roles, both of which MITRE lists as mitigations ([T1098.003](https://attack.mitre.org/techniques/T1098/003/)).
+
+#### Security events surge
+
+Many refused calls, rejected inputs, or one address trying many accounts. The digest's findings name the actors (`authz-probing`, `validation-fuzzing`, `many-accounts-one-ip`, …; see [Detecting unauthorized access](#detecting-unauthorized-access)). Contain as in [When something is found](#when-something-is-found): stop the account, block briefly at the edge, and close what was used.
+
+#### Server errors, timeouts and LLM problems
+
+These are about reliability, not security, unless the pattern looks like an attack. Run `resultlog digest` over the window: the failure groups by `fingerprint` come most frequent first, with the upstream calls that failed and the breadcrumbs. For timeouts, a `pending` call is one that never answered, and the function's own timeout is the other thing to check. For LLM problems, look at `max_tokens`, the prompt and the provider's status: these arrive with a `200`, so no error was raised. If an alert of this kind keeps firing and nobody does anything, change its threshold or its channel; "every page should be actionable" ([Monitoring Distributed Systems](https://sre.google/sre-book/monitoring-distributed-systems/)).
+
+### Evidence and records
+
+Keep the record before you change anything.
+
+- **What Google keeps for you.** Admin Activity entries are in the `_Required` bucket for 400 days, a period you can't change ([Quotas and limits](https://docs.cloud.google.com/logging/quotas)), and that bucket has no storage or retention charge ([Pricing](https://cloud.google.com/monitoring/pricing)).
+- **A copy you control.** Route the entries with a sink into a bucket of your own, where retention is 1 to 3650 days; across a folder or an organization, use an aggregated sink ([Best practices for Cloud Audit Logs](https://docs.cloud.google.com/logging/docs/audit/best-practices)). Locking the bucket makes it tamper-resistant, and **locking is irreversible**: nobody can delete the bucket until every entry has passed its retention, and a project lien is recommended. The console can't lock a bucket; `gcloud logging buckets update … --locked` can ([Configure log buckets](https://docs.cloud.google.com/logging/docs/buckets)). The commands are in [Keep your audit trail with the Admin Activity audit logs](#keep-your-audit-trail-with-the-admin-activity-audit-logs).
+- **An export of the incident**, as files you can keep:
+
+  ```bash
+  gcloud logging read 'logName:"cloudaudit.googleapis.com%2Factivity" AND protoPayload.authenticationInfo.principalEmail="someone@example.com"' --freshness=7d --format=json > evidence-principal.json
+  gcloud logging read 'resource.type="cloud_run_revision" AND jsonPayload.actor.ip="203.0.113.5"' --freshness=7d --format=json > evidence-address.json
+  npx resultlog digest evidence-address.json --pseudonymize
+  ```
+
+  Keep the files outside the project if its accounts may be compromised.
+- **Data Access logs are a decision made in advance.** They are disabled by default (apart from some BigQuery services), their volume can be large, and enabling them might add charges ([Enable Data Access audit logs](https://docs.cloud.google.com/logging/docs/audit/configure-data-access)). Enabling them after an incident does not bring back the past. Reading them takes `roles/logging.privateLogViewer` ([Access control with IAM](https://docs.cloud.google.com/logging/docs/access-control)).
+- **Keep secrets out of the evidence.** Passwords, tokens, keys, session ids and sensitive personal data should not be in logs at all ([OWASP Logging Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html)). resultlog redacts by key and by pattern, but it is not data-loss prevention: see [Redaction](#redaction).
+
+### After the incident
+
+- Write the timeline: what was seen, when, what was done, by whom, and how long it took to notice.
+- Change something: a new alert, or a narrower one; an organization policy that makes the thing impossible (key creation, public access); a line in the runbook. OWASP asks for alerting use cases and playbooks to be maintained ([A09:2025](https://top10.owasp.org/2025/A09_2025-Security_Logging_and_Alerting_Failures)), and NIST's guide aims at better detection, response and recovery ([SP 800-61r3](https://csrc.nist.gov/pubs/sp/800/61/r3/final)).
+- Rotate whatever may have been exposed, even if nothing is known to have been read.
+- If an alert fired for your own routine work again and again, narrow it by principal. If a page needed no thought, make it a ticket or automate it: "Pages with rote, algorithmic responses should be a red flag" ([Monitoring Distributed Systems](https://sre.google/sre-book/monitoring-distributed-systems/)).
+
+### Beyond these alerts
+
+The alerts here need no subscription, and cover the four project changes and your functions. For managed, organization-wide detection, Security Command Center's Event Threat Detection (Premium tier) reads Cloud Audit Logs in near-real time and reports findings such as IAM Anomalous Grant, Service Account Key Created, Dormant Service Account Key Created and Leaked Service Account Key Used ([Overview of Event Threat Detection](https://docs.cloud.google.com/security-command-center/docs/concepts-event-threat-detection-overview)). It is a paid tier, and resultlog does not replace it.
+
+### Sources
+
+- **Google Cloud**: [Alerting overview](https://docs.cloud.google.com/monitoring/alerts); [Log-based alerts](https://docs.cloud.google.com/logging/docs/alerting/log-based-alerts); [Log-based metrics](https://docs.cloud.google.com/logging/docs/logs-based-metrics); [Create and manage notification channels](https://docs.cloud.google.com/monitoring/support/notification-options); [Snooze notifications and alerts](https://docs.cloud.google.com/monitoring/alerts/snooze); [Control access with IAM (Cloud Monitoring)](https://docs.cloud.google.com/monitoring/access-control); [Access control with IAM (Cloud Logging)](https://docs.cloud.google.com/logging/docs/access-control); [Quotas and limits](https://docs.cloud.google.com/logging/quotas); [Pricing](https://cloud.google.com/monitoring/pricing); [Cloud Audit Logs](https://docs.cloud.google.com/logging/docs/audit); [Best practices for Cloud Audit Logs](https://docs.cloud.google.com/logging/docs/audit/best-practices); [Enable Data Access audit logs](https://docs.cloud.google.com/logging/docs/audit/configure-data-access); [Configure log buckets](https://docs.cloud.google.com/logging/docs/buckets); [Logging query language](https://docs.cloud.google.com/logging/docs/view/logging-query-language); [IAM audit logging](https://docs.cloud.google.com/iam/docs/audit-logging); [API Keys audit logging](https://docs.cloud.google.com/api-keys/docs/audit-logging); [Best practices for managing service account keys](https://docs.cloud.google.com/iam/docs/best-practices-for-managing-service-account-keys); [Restrict IAM service account usage](https://docs.cloud.google.com/resource-manager/docs/organization-policy/restricting-service-accounts); [Best practices for managing API keys](https://docs.cloud.google.com/docs/authentication/api-keys-best-practices); [Allowing public (unauthenticated) access](https://docs.cloud.google.com/run/docs/authenticating/public); [Overview of Event Threat Detection](https://docs.cloud.google.com/security-command-center/docs/concepts-event-threat-detection-overview).
+- **Firebase**: [Audit logging for Firebase Security Rules](https://firebase.google.com/support/guides/cloud-audit-logging/firebase-rules); [Audit logging for Firebase Management](https://firebase.google.com/support/guides/cloud-audit-logging/firebase-management); [Avoid insecure rules](https://firebase.google.com/docs/rules/insecure-rules); [Manage and deploy Firebase Security Rules](https://firebase.google.com/docs/rules/manage-deploy); [Learn about and manage API keys for Firebase](https://firebase.google.com/docs/projects/api-keys); [Manage User Sessions](https://firebase.google.com/docs/auth/admin/manage-sessions); [Enable App Check enforcement for Cloud Functions](https://firebase.google.com/docs/app-check/cloud-functions).
+- **Security practice**: [OWASP Top 10:2025, A09 Security Logging and Alerting Failures](https://top10.owasp.org/2025/A09_2025-Security_Logging_and_Alerting_Failures); [OWASP Logging Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html); [NIST SP 800-61 Rev. 3](https://csrc.nist.gov/pubs/sp/800/61/r3/final); [MITRE ATT&CK T1098.001, Additional Cloud Credentials](https://attack.mitre.org/techniques/T1098/001/); [T1098.003, Additional Cloud Roles](https://attack.mitre.org/techniques/T1098/003/); [Google SRE book, Monitoring Distributed Systems](https://sre.google/sre-book/monitoring-distributed-systems/).
 
 ## Investigating with an AI assistant
 
