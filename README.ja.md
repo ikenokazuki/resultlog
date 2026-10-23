@@ -1,6 +1,14 @@
 # resultlog
 
+[![CI](https://github.com/ikenokazuki/resultlog/actions/workflows/ci.yml/badge.svg)](https://github.com/ikenokazuki/resultlog/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/resultlog)](https://www.npmjs.com/package/resultlog)
+[![license](https://img.shields.io/npm/l/resultlog)](LICENSE)
+
+Firebase Function の実行を、1 件の記録にします。
+
 [English](README.md)
+
+## 概要
 
 Firebase Functions (v2) のハンドラから [neverthrow](https://github.com/supermacro/neverthrow) の `Result` を返すだけで、実行ごとに次のものが得られます。
 
@@ -20,7 +28,8 @@ Firebase Functions (v2) のハンドラから [neverthrow](https://github.com/su
 - **AI と一緒に作業するための道具**。失敗の種類を表す `fingerprint`、1 日分のログを AI アシスタントに渡せる大きさのレポートにする `resultlog digest`、ハンドラが何をログに出したかをテストで検証できるテスト用ヘルパー、AI コーディングアシスタント向けの `llms.txt` です。
 - **小さなクライアント用ヘルパー**。失敗した呼び出しを、フォームの項目ごとのメッセージに変換します。
 - **不正アクセスの検知**。OWASP Logging Vocabulary の名前を使ったセキュリティイベント（エラーに宣言するか、`logContext.security` で記録）、App Check の状態とリプレイの検知、Identity Platform のブロッキング関数によるサインインのイベント、全エントリに載せられる `actor`（任意）、digest の検知ルール。
-- **Cloud Monitoring の設定**。resultlog が書き出すものに合わせたログベース指標、アラートポリシー、ダッシュボードを生成し、適用するスクリプトも付きます（`resultlog monitoring`）。
+- **プロジェクト自体への変更のアラート**。Firebase Security Rules、IAM ポリシー、サービスアカウントキー、Firebase や API キーの設定。Google が常に書き出す管理アクティビティ監査ログを使います。
+- **Cloud Monitoring の設定**。resultlog が書き出すものに合わせたログベース指標、アラートポリシー、ダッシュボードを、`gcloud` 用のファイルとして生成します（`resultlog monitoring`）。
 
 ## 解決する課題
 
@@ -32,29 +41,116 @@ Firebase Functions と Result 型を組み合わせるプロジェクトでは�
 4. **調査に必要な記録がない。** 不正アクセスが疑われたとき、誰が・どこから・何をして・成功したのかを知る必要がありますが、普段のログには一貫した形で残っていません。
 5. **API ごとにエラーの形が違う。** Stripe、生成 AI、gRPC、fetch はそれぞれ別の形で失敗を返すため、リトライや通知のルールがあちこちに散らばります。
 
-## 導入
+## 目次
 
-resultlog はまだ npm に公開していません。公開するまでは、このリポジトリで tarball を作り、Functions のプロジェクトにインストールしてください。
+- [概要](#概要)
+- [解決する課題](#解決する課題)
+- [インストール](#インストール)
+- [クイックスタート](#クイックスタート)
+- [トップレベル API](#トップレベル-api)
+- [API ドキュメント](#api-ドキュメント)
+  - [ハンドラアダプタ](#ハンドラアダプタ)
+    - [`wrapCall` (function)](#wrapcall-function)
+    - [`wrapRequest` (function)](#wraprequest-function)
+    - [`wrapEvent` (function)](#wrapevent-function)
+    - [`wrapBlocking` (function)](#wrapblocking-function)
+  - [エラー](#エラー)
+    - [`defineError` (function)](#defineerror-function)
+    - [`AppError` (class)](#apperror-class)
+    - [`InvalidInput` (class)](#invalidinput-class)
+    - [`DeadlineExceeded` (class)](#deadlineexceeded-class)
+  - [他のサービスの呼び出し](#他のサービスの呼び出し)
+    - [`toExternalError` (function)](#toexternalerror-function)
+    - [`ExternalError` (class)](#externalerror-class)
+    - [`retry` (function)](#retry-function)
+    - [`fallback` (function)](#fallback-function)
+  - [ハンドラ内でのログ](#ハンドラ内でのログ)
+    - [`logContext.set` (method)](#logcontextset-method)
+    - [`logContext.debug` (method)](#logcontextdebug-method)
+    - [`logContext.error` (method)](#logcontexterror-method)
+    - [`logContext.audit` (method)](#logcontextaudit-method)
+    - [`logContext.security` (method)](#logcontextsecurity-method)
+    - [`logContext.setActor` (method)](#logcontextsetactor-method)
+    - [`logContext.llm` (method)](#logcontextllm-method)
+    - [`logContext.signal` (property)](#logcontextsignal-property)
+  - [設定](#設定)
+    - [`configure` (function)](#configure-function)
+  - [重複防止](#重複防止)
+    - [`firestoreIdempotency` (function)](#firestoreidempotency-function)
+  - [ユーティリティ](#ユーティリティ)
+    - [`fingerprint` (function)](#fingerprint-function)
+  - [テスト](#テスト)
+    - [`captureLogs` (function)](#capturelogs-function)
+    - [`callableRequest` (function)](#callablerequest-function)
+    - [`httpExchange` (function)](#httpexchange-function)
+    - [`cloudEvent` (function)](#cloudevent-function)
+    - [`authBlockingEvent` (function)](#authblockingevent-function)
+  - [アプリ側で](#アプリ側で)
+    - [`parseError` (function)](#parseerror-function)
+    - [`parseErrorBody` (function)](#parseerrorbody-function)
+  - [Digest](#digest)
+    - [`parseLogs` (function)](#parselogs-function)
+    - [`digest` (function)](#digest-function)
+  - [Cloud Monitoring のファイル](#cloud-monitoring-のファイル)
+    - [`monitoring` (function)](#monitoring-function)
+    - [`files` (function)](#files-function)
+  - [コマンドライン](#コマンドライン)
+    - [`resultlog digest` (command)](#resultlog-digest-command)
+    - [`resultlog monitoring` (command)](#resultlog-monitoring-command)
+- [タイムアウト](#タイムアウト)
+- [出力されるログ](#出力されるログ)
+  - [Cloud Logging で読みやすくするための項目](#cloud-logging-で読みやすくするための項目)
+- [外部 API](#外部-api)
+- [重複イベント](#重複イベント)
+- [リトライ](#リトライ)
+  - [リトライを重ねない](#リトライを重ねない)
+- [外部への呼び出し](#外部への呼び出し)
+- [LLM の呼び出し](#llm-の呼び出し)
+- [セキュリティ監査と調査](#セキュリティ監査と調査)
+  - [管理アクティビティ監査ログと一緒に保管する](#管理アクティビティ監査ログと一緒に保管する)
+- [不正アクセスの検知](#不正アクセスの検知)
+  - [関数から見えるものと見えないもの](#関数から見えるものと見えないもの)
+  - [記録されるもの](#記録されるもの)
+  - [誰が呼んだか](#誰が呼んだか)
+  - [サインイン: wrapBlocking](#サインイン-wrapblocking)
+  - [アラート](#アラート)
+  - [何か見つかったら](#何か見つかったら)
+  - [resultlog がやらないこと](#resultlog-がやらないこと)
+- [Cloud Monitoring](#cloud-monitoring)
+  - [コンソールで手作業で](#コンソールで手作業で)
+  - [ファイルとして書き出す](#ファイルとして書き出す)
+  - [作られるもの](#作られるもの)
+  - [プロジェクト自体への変更](#プロジェクト自体への変更)
+  - [適用](#適用)
+  - [知っておくこと](#知っておくこと)
+- [AI アシスタントと調べる](#ai-アシスタントと調べる)
+- [ログの費用](#ログの費用)
+- [マスキング](#マスキング)
+- [制限事項](#制限事項)
+- [開発](#開発)
+- [ライセンス](#ライセンス)
 
-```bash
-bun install
-npm pack                              # dist/ をビルドして resultlog-0.1.0.tgz を作ります
-npm install ./resultlog-0.1.0.tgz     # Functions のプロジェクトで実行
+## インストール
+
+```sh
+npm install resultlog neverthrow
 ```
 
-ESM と CommonJS の両方と型定義を同梱していて、`module: nodenext`（Firebase の既定）、`bundler`、従来の `node` 解決のいずれでも使えます。
+`neverthrow`、`firebase-functions`、`firebase-admin` は peer dependency です。後ろの 2 つは Functions のプロジェクトにすでに入っているはずで、足りないものは npm が入れます。`zod` は任意です（下記）。
 
-必要なもの（一般的な Functions プロジェクトなら大半は導入済みです）:
+ESM と CommonJS の両方と型定義を同梱していて、`module: nodenext`（Firebase の既定）、`bundler`、古い `node` の解決方法で使えます。
+
+必要なもの（Functions のプロジェクトなら、たいていはほとんど揃っています）:
 
 - Node.js 20 以上
 - `firebase-functions` 6 または 7（v2 API）と `firebase-admin`
 - `neverthrow` 8
-- `zod` 4: 省略可。渡すスキーマの型にだけ必要です
-- TypeScript 5.4 以上
+- `zod` 4: 任意。渡すスキーマの型にだけ必要です
+- TypeScript 5.4 以降
 
 テストは firebase-functions 7.4、6.6、6.0 で通り、peer 範囲が許す最低版（firebase-admin 11.10、firebase-functions 6.0、neverthrow 8.0、zod 4.0）でも通ります。型定義は、`skipLibCheck` が有効でなければ firebase-functions 7 が必要です（6 は `firebase-functions/v2/https` から `Response` と `CallableResponse` を export していないため）。
 
-エントリポイント: `resultlog`（サーバー側）、`resultlog/client`（アプリ用。サーバー側のモジュールを import しません）、`resultlog/testing`、`resultlog/digest`、`resultlog/monitoring`、そして `resultlog` コマンド（`digest` と `monitoring`）です。
+エントリポイント: `resultlog`（サーバー側）、`resultlog/client`（アプリ側。サーバー側の import を含みません）、`resultlog/testing`、`resultlog/digest`、`resultlog/monitoring`、そして `resultlog` コマンド（`digest` と `monitoring`）。
 
 ## クイックスタート
 
@@ -83,32 +179,1320 @@ export const getUser = onCall(
 );
 ```
 
-## ハンドラアダプタ
+これで設定は終わりです。この関数では次のようになります。
 
-ハンドラを包んでから、いつもどおりトリガーに渡します。ハンドラは `Result`、`ResultAsync`、`Promise<Result>` のいずれを返しても構いません。
+- ユーザーが見つかれば、値を返し、1 本のエントリを書きます: `{ "severity": "INFO", "message": "getuser ok 42 ms", "authUid": "u1", "plan": "pro", "httpRequest": { … } }`
+- 存在しない id は WARNING（`not-found`）になり、通知は飛びません。クライアントには「ユーザーが見つかりません。」と `details.reason: "UserNotFound"` が返ります。
+- Firestore の失敗は ERROR になり、スタックと原因付きで Error Reporting に送られます。クライアントには `INTERNAL` だけが返ります。
+- 不正な `id` は、ハンドラが動く前に拒否され、クライアントには項目ごとに表示できる zod の issues が返ります。
 
-| アダプタ | 使う場所 | 初期属性 | Ok | Err（WARNING） | Err（ERROR / CRITICAL） |
+エントリそのものは[出力されるログ](#出力されるログ)、それ以外はすべて [API ドキュメント](#api-ドキュメント)を参照してください。
+
+## トップレベル API
+
+resultlog が公開するものは次のとおりです。最初のグループがサーバー側の `resultlog` 本体で、ほかは別のエントリポイントです。
+
+**`resultlog`**
+
+- [`wrapCall`](#wrapcall-function)、[`wrapRequest`](#wraprequest-function)、[`wrapEvent`](#wrapevent-function)、[`wrapBlocking`](#wrapblocking-function): `Result` を返すハンドラを Firebase のトリガーが受け取れる形にし、実行ごとに 1 本のログエントリを書きます
+- [`defineError`](#defineerror-function) と [`AppError`](#apperror-class): スタックを保ち、ログへの出し方・クライアントへの見せ方・リトライの要否を持つエラーを作ります。[`InvalidInput`](#invalidinput-class) と [`DeadlineExceeded`](#deadlineexceeded-class) は、ライブラリ自身が起こす 2 つのエラーです
+- [`toExternalError`](#toexternalerror-function) と [`ExternalError`](#externalerror-class): 外部の障害（Stripe、AI プロバイダ、Firestore、fetch、axios）を 1 つのエラーモデルにします
+- [`retry`](#retry-function) と [`fallback`](#fallback-function): すでにあるリトライに重ねずに、呼び出しをやり直したり別のプロバイダを試したりします
+- [`logContext`](#ハンドラ内でのログ): 実行のエントリに情報を足します。[`set`](#logcontextset-method)、[`debug`](#logcontextdebug-method)、[`error`](#logcontexterror-method)、[`audit`](#logcontextaudit-method)、[`security`](#logcontextsecurity-method)、[`setActor`](#logcontextsetactor-method)、[`llm`](#logcontextllm-method)、[`signal`](#logcontextsignal-property)
+- [`configure`](#configure-function): サンプリング、タイムアウト、マスキング、LLM の価格関数、actor の扱い、sink を設定します
+- [`firestoreIdempotency`](#firestoreidempotency-function): 1 つのイベントでイベントトリガーが 2 回動かないようにします
+- [`fingerprint`](#fingerprint-function): 失敗の種類に名前を付けます
+
+**`resultlog/testing`**: [`captureLogs`](#capturelogs-function)、[`callableRequest`](#callablerequest-function)、[`httpExchange`](#httpexchange-function)、[`cloudEvent`](#cloudevent-function)、[`authBlockingEvent`](#authblockingevent-function)
+
+**`resultlog/client`**: [`parseError`](#parseerror-function)、[`parseErrorBody`](#parseerrorbody-function)
+
+**`resultlog/digest`**: [`digest`](#digest-function)、[`parseLogs`](#parselogs-function)
+
+**`resultlog/monitoring`**: [`monitoring`](#monitoring-function)、[`files`](#files-function)
+
+**コマンドライン**: [`resultlog digest`](#resultlog-digest-command)、[`resultlog monitoring`](#resultlog-monitoring-command)
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+## API ドキュメント
+
+各例は、必要な import がファイルの先頭にあるものとして書いてあります。[クイックスタート](#クイックスタート)に、まとめて載せています。`Outcome<T>` は、ハンドラが返してよいものを指します。`Result<T, AppError>`、`ResultAsync<T, AppError>`、`Promise<Result<T, AppError>>` のいずれかです。
+
+### ハンドラアダプタ
+
+ハンドラをラップして、いつもどおりトリガーに渡します。アダプタは、ハンドラを実行のコンテキストの中で動かし、設定してあれば[タイムアウトのガード](#タイムアウト)をかけ、最後の `Result` を 1 本のログエントリと呼び出し元への応答にします。
+
+| アダプタ | 使う場所 | 最初から入る属性 | Ok | Err（WARNING） | Err（ERROR / CRITICAL） |
 |---|---|---|---|---|---|
-| `wrapCall([schema,] fn, options?)` | `onCall` | `authUid`, `httpRequest` | 値をクライアントに返す | `HttpsError(code, publicMessage, details)` を throw | `HttpsError(code, publicMessage)` を throw（details なし） |
-| `wrapRequest([schema,] fn, options?)` | `onRequest` | `httpRequest`（method, path） | `200` で値を JSON 返却 | コードに対応する HTTP ステータスで `{ error: { status, message, details } }` を返す | 同じ形で `details` なし |
-| `wrapEvent(fn, options?)` | Pub/Sub、Firestore、Scheduler など | `eventId`, `eventType` | — | ログを出して正常終了（`retryable` なエラーは再 throw） | ログを出して再 throw（リトライ有効ならリトライされる。`retryable: false` なら正常終了） |
-| `wrapBlocking(fn, options?)` | `beforeUserSignedIn`、`beforeUserCreated` | `eventId`, `eventType` | Firebase に返す（カスタムクレームなど）。監査イベント `authn_login_success`（サインアップは `user_created`）を記録 | `HttpsError` を throw。セキュリティイベント `authn_login_fail` を記録 | 同じ。ただし `failOpen: true` ならサインインを通す |
+| `wrapCall([schema,] fn, options?)` | `onCall` | `authUid`、`httpRequest` | 値をクライアントに返す | `HttpsError(code, publicMessage, details)` を throw | `HttpsError(code, publicMessage)` を throw（details なし） |
+| `wrapRequest([schema,] fn, options?)` | `onRequest` | `httpRequest`（method、path） | `200` で値を JSON 返却 | コードに対応する HTTP ステータスで `{ error: { status, message, details } }` を返す | 同じ形で `details` なし |
+| `wrapEvent(fn, options?)` | Pub/Sub、Firestore、Scheduler など | `eventId`、`eventType` | — | ログを出して正常終了（`retryable` なエラーは再 throw） | ログを出して再 throw（リトライ有効ならリトライされる。`retryable: false` なら正常終了） |
+| `wrapBlocking(fn, options?)` | `beforeUserSignedIn`、`beforeUserCreated` | `eventId`、`eventType` | Firebase に返す（カスタムクレームなど）。監査イベント `authn_login_success`（サインアップは `user_created`） | `HttpsError` を throw。セキュリティイベント `authn_login_fail` | 同じ。ただし `failOpen: true` ならサインインを通す |
 
-- **スキーマ。** zod スキーマを渡すと、`fn` の実行前に `request.data`（または `req.body`）を `safeParseAsync` で検証し、型もスキーマから付きます。不正な入力は `InvalidInput` エラー（`invalid-argument`、WARNING）になり、`fn` は呼ばれません。zod の `issues` はログに残り、クライアントにも `details.issues` として返るので、フォームで項目ごとのエラーを表示できます。スキーマなしの場合、`request.data` は `unknown` です。
-- **省略可能な項目。** Firebase のクライアント SDK は `undefined` のプロパティを `null` として送ります。省略可能な項目は `.optional()` ではなく `.nullish()` で宣言してください。
-- **ストリーミング。** `wrapCall` は `onCall` のストリーミング用 `response` をハンドラの第 2 引数に渡します: `(request, response) => { response?.sendChunk(part); … }`
-- **throw された例外**は、元のスタックを保ったまま `internal` の ERROR として記録します。`HttpsError` が throw された場合はそのコードと details を維持するので、既存のハンドラを包んでもクライアントへの応答は変わりません。
-- **`wrapRequest`** は、ハンドラが自分で応答済み（`res.headersSent`）なら何も送りません。
-- **`wrapEvent`** は、ジェネリックなトリガー関数を通すとイベントの型を推論できません。型注釈を付けるか、トリガーに型引数を渡してください。
+**ハンドラのオプション。** どのアダプタも、最後の引数で受け取ります。
 
-  ```ts
-  onMessagePublished("orders", wrapEvent((event: CloudEvent<MessagePublishedData>) => handle(event)));
-  onMessagePublished<Order>("orders", wrapEvent((event) => handle(event.data.message.json)));
-  ```
+```ts
+interface HandlerOptions {
+  /** 開始からこの秒数からマージンを引いた時点で、実行を打ち切る。指定がなく configure({ timeoutSeconds }) もなければ、ガードはかからない。 */
+  timeoutSeconds?: number;
+  /** タイムアウトの何ミリ秒前にガードが介入するか。既定は 1000。 */
+  timeoutMarginMs?: number;
+}
+```
 
-  イベントのペイロードは自動では検証しません。ハンドラ内で zod を使って検証してください。
+**throw された例外**は、元のスタックを保ったまま、コード `internal` の ERROR として記録されます。throw された `HttpsError` はコードと details を保つので、既存のハンドラをラップしても、クライアントが受け取るものは変わりません。
 
-- **`maxEventAgeMs`。** `wrapEvent(fn, { maxEventAgeMs: 60 * 60 * 1000 })` とすると、CloudEvent の `time` が上限より古いイベントは `fn` を実行せずに正常終了し、`EventTooOld` の WARNING として記録します。リトライを有効にすると、Cloud Functions（第 2 世代）は失敗したイベントを最大 24 時間リトライし続けます。これを早めに打ち切ります。
+#### `wrapCall` (function)
+
+`onCall` 用です。`Ok` の値はクライアントに返ります。`Err` は、そのエラーの `code` と `publicMessage` を持つ `HttpsError` になります。WARNING のエラーには、`reason`（エラーの名前）を含む `details` も付くので、アプリは同じコードを共有するエラーを見分けられます。zod のスキーマを渡すと、`fn` の前に `request.data` が `safeParseAsync` で検証され、型はスキーマから決まります。
+
+**シグネチャ:**
+
+```ts
+function wrapCall<T>(
+  fn: (request: CallableRequest<unknown>, response?: CallableResponse) => Outcome<T>,
+  options?: HandlerOptions,
+): (request: CallableRequest, response?: CallableResponse) => Promise<T>;
+
+function wrapCall<S extends ZodType, T>(
+  schema: S,
+  fn: (request: CallableRequest<output<S>>, response?: CallableResponse) => Outcome<T>,
+  options?: HandlerOptions,
+): (request: CallableRequest<input<S>>, response?: CallableResponse) => Promise<T>;
+```
+
+**例:**
+
+```ts
+import { onCall } from "firebase-functions/v2/https";
+import { err, ok } from "neverthrow";
+import { z } from "zod";
+import { defineError, wrapCall } from "resultlog";
+
+class SoldOut extends defineError("SoldOut", { code: "failed-precondition", publicMessage: "売り切れです。" }) {}
+
+export const reserve = onCall(
+  wrapCall(z.object({ sku: z.string(), quantity: z.number().int().positive() }), (request) =>
+    request.data.quantity > 5 //     ^ 型はスキーマから決まる
+      ? err(new SoldOut(`${request.data.sku} は残り 5 個`))
+      : ok({ reserved: request.data.quantity }),
+  ),
+);
+```
+
+- 不正な入力は [`InvalidInput`](#invalidinput-class) エラー（`invalid-argument`、WARNING）になり、`fn` は呼ばれません。zod の `issues` はログに残り、`details.issues` としてクライアントにも届くので、フォームは項目ごとにメッセージを出せます（[`parseError`](#parseerror-function) が `fieldErrors` にします）。スキーマがなければ、`request.data` は `unknown` です。
+- Firebase のクライアント SDK は `undefined` のプロパティを `null` として送るので、任意の項目は `.optional()` ではなく `.nullish()` で宣言してください。
+- `response` は `onCall` のストリーミング応答です: `(request, response) => { response?.sendChunk(part); … }`。
+- エントリには、最初から `authUid`、呼び出した人の `actor`（[誰が呼んだか](#誰が呼んだか)を参照）、クライアントが受け取るステータスを持つ `httpRequest` が入ります。
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+#### `wrapRequest` (function)
+
+`onRequest` 用です。`Ok` の値は `200` の JSON で返ります。`Err` は、そのコードに対応する HTTP ステータスと、callable のエラーと同じ形の本文 `{ error: { status, message, details } }` で返ります。スキーマを渡すと `req.body` が検証され、型が付きます。ハンドラがすでに応答していれば（`res.headersSent`）何も送らず、エントリには送ったステータスが記録されます。
+
+**シグネチャ:**
+
+```ts
+function wrapRequest<T>(
+  fn: (req: Request, res: Response) => Outcome<T>,
+  options?: HandlerOptions,
+): (req: Request, res: Response) => Promise<void>;
+
+function wrapRequest<S extends ZodType, T>(
+  schema: S,
+  fn: (req: Request & { body: output<S> }, res: Response) => Outcome<T>,
+  options?: HandlerOptions,
+): (req: Request, res: Response) => Promise<void>;
+```
+
+**例:**
+
+```ts
+import { onRequest } from "firebase-functions/v2/https";
+import { z } from "zod";
+import { wrapRequest } from "resultlog";
+
+export const webhook = onRequest(
+  wrapRequest(z.object({ id: z.string() }), (req) => processWebhook(req.body.id)),
+);
+```
+
+- クライアントのアドレス、`X-Forwarded-For`、ユーザーエージェントは `actor` に記録されます。自分で検証した uid は [`logContext.setActor`](#logcontextsetactor-method) で足してください。
+- エントリの `httpRequest` には、メソッド、パス（クエリ文字列は含めません。秘密情報が入りうるためです）、ステータス、所要時間が入ります。
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+#### `wrapEvent` (function)
+
+イベントトリガー用です。Pub/Sub、Firestore、Scheduler、Storage などに使えます。`retryable` な失敗は再 throw されるので、プラットフォームがイベントをリトライします（リトライを有効にしている場合）。それ以外の失敗はログに出して正常終了します。`retryable` は、既定ではサーバー側の失敗です（[`AppError`](#apperror-class)を参照）。
+
+**シグネチャ:**
+
+```ts
+function wrapEvent<E>(
+  fn: (event: E) => Outcome<unknown>,
+  options?: EventOptions,
+): (event: E) => Promise<void>;
+
+interface EventOptions extends HandlerOptions {
+  /** CloudEvent の `time` がこれより古いイベントは、`fn` を呼ばずに受理する（WARNING として記録）。 */
+  maxEventAgeMs?: number;
+  /** すでに処理したイベントを飛ばす。`firestoreIdempotency` を参照。 */
+  idempotency?: IdempotencyStore;
+  /** 確保（claim）が再配信を止める時間。既定はタイムアウト + 60 秒（タイムアウトの設定がなければ 540 秒）。 */
+  leaseMs?: number;
+}
+```
+
+**例:**
+
+```ts
+import type { CloudEvent } from "firebase-functions/v2";
+import { type MessagePublishedData, onMessagePublished } from "firebase-functions/v2/pubsub";
+import { wrapEvent } from "resultlog";
+
+export const onOrder = onMessagePublished(
+  "orders",
+  wrapEvent((event: CloudEvent<MessagePublishedData>) => handleOrder(event.data.message.json), {
+    maxEventAgeMs: 60 * 60 * 1000,
+  }),
+);
+```
+
+- イベントの型は、汎用のトリガー関数からは推論されません。上のように注釈を付けるか、トリガーの型引数を渡してください: `onMessagePublished<Order>("orders", wrapEvent((event) => …))`。イベントのペイロードは検証されません。ハンドラの中で zod を使って検証してください。
+- `maxEventAgeMs` はリトライの暴走を止めます。リトライを有効にすると、Cloud Functions（第 2 世代）は失敗するイベントを最長 24 時間リトライし続けます。上限より古いイベントは、`fn` を呼ばずに受理し、`EventTooOld` の WARNING として記録します。
+- `idempotency` を渡すと、ハンドラはイベントごとに 1 回だけ動きます。[`firestoreIdempotency`](#firestoreidempotency-function)を参照してください。
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+#### `wrapBlocking` (function)
+
+Identity Platform のブロッキングトリガー `beforeUserSignedIn` と `beforeUserCreated` 用です。通ったサインインはすべて、アドレス・ユーザーエージェント・サインイン方法付きの監査イベント `authn_login_success`（サインアップは `user_created`）として記録されます。`AppError` を返すとサインインを拒否します。Firebase には `HttpsError` が渡り、ログにはセキュリティイベント `authn_login_fail`（またはエラーが名乗る `securityEvent`）が残ります。成功時に `fn` が返したものは Firebase に渡ります。カスタムクレームや `disabled` などです。
+
+**シグネチャ:**
+
+```ts
+function wrapBlocking<R = void>(
+  fn: (event: AuthBlockingEvent) => Outcome<R>,
+  options?: BlockingOptions,
+): (event: AuthBlockingEvent) => Promise<R | undefined>;
+
+interface BlockingOptions extends HandlerOptions {
+  /** ポリシー自体が壊れたとき（例外、タイムアウト）にどうするか。false（既定）ならサインインを拒否し、true なら通して失敗をログに残す。ポリシーが意図して返した拒否は、常にそのまま守られる。 */
+  failOpen?: boolean;
+}
+```
+
+**例:**
+
+```ts
+import { beforeUserSignedIn } from "firebase-functions/v2/identity";
+import { err, ok } from "neverthrow";
+import { defineError, wrapBlocking } from "resultlog";
+
+class BlockedAddress extends defineError("BlockedAddress", { code: "permission-denied", publicMessage: "サインインできません。" }) {}
+
+export const onSignIn = beforeUserSignedIn(
+  wrapBlocking((event) => (isDenied(event.ipAddress) ? err(new BlockedAddress("拒否リストにある")) : ok({ sessionClaims: { plan: "free" } }))),
+);
+```
+
+- プロジェクトを、Identity Platform を使う Firebase Authentication にアップグレードしておく必要があります。Firebase はブロッキング関数に 7 秒を与えるので、ここではグローバルのタイムアウトに関係なく、タイムアウトのガードの既定が 7 秒になります。
+- 認証情報が検証された後に動くので、間違ったパスワードはここに来ません。[関数から見えるものと見えないもの](#関数から見えるものと見えないもの)を参照してください。Auth エミュレータでは、アドレスとユーザーエージェントはプレースホルダーです。
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+### エラー
+
+ライブラリをまたぐエラーは `AppError` です。Firebase の `code`、クライアント向けのメッセージ、どこに報告するかを決める severity、失敗したイベントをリトライするかどうかを持ちます。使うものは名前付きのクラスとして定義してください。throw せず、`err(new UserNotFound(…))` のように返します。
+
+#### `defineError` (function)
+
+既定値を持つ `AppError` のサブクラスを返します。名前付きのクラスで継承すると、エディタのホバーや型エラーに無名クラスではなく `UserNotFound` と表示されます。
+
+**シグネチャ:**
+
+```ts
+function defineError<N extends string>(
+  name: N,
+  defaults: Omit<AppErrorOptions, "context" | "cause">,
+): new (message: string, options?: { context?: Record<string, unknown>; details?: Record<string, unknown>; cause?: unknown }) => AppError & { name: N };
+```
+
+**例:**
+
+```ts
+import { AppError, defineError } from "resultlog";
+
+class UserNotFound extends defineError("UserNotFound", { code: "not-found", publicMessage: "ユーザーが見つかりません。" }) {}
+
+const e = new UserNotFound("users/u9 does not exist", { cause, context: { id: "u9" } });
+e instanceof UserNotFound; // true
+e instanceof AppError;     // true
+e.name;                    // "UserNotFound"（リテラル型なので、エラーのユニオンを名前で絞り込める）
+```
+
+- `message` は内部用です。ログにだけ出ます。
+- `publicMessage` はクライアントに見せるメッセージです。既定は `"NOT_FOUND"` のような標準のステータス名で、内部のメッセージがうっかりクライアントに出ることはありません。
+- WARNING のエラーでは、クライアントに `details` も届きます: `{ reason: "UserNotFound", …渡した details }`。`reason` により、アプリは同じコードを共有するエラー（たとえば 2 種類の `already-exists`）を見分け、翻訳済みの文言を選べます。`details` は公開されるので、秘密情報は入れないでください。ERROR と CRITICAL のエラーでは、`publicMessage` 以外はクライアントに渡りません。
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+#### `AppError` (class)
+
+基底クラスです。一度きりのエラーにはこれを直接使い、繰り返し出会うものには [`defineError`](#defineerror-function) を使います。
+
+**シグネチャ:**
+
+```ts
+class AppError extends Error {
+  constructor(message: string, options: AppErrorOptions);
+  readonly code: ErrorCode;           // "not-found" のような Firebase のコード。"ok" は含まない
+  readonly severity: Severity;        // "WARNING" | "ERROR" | "CRITICAL"
+  readonly retryable: boolean;
+  readonly publicMessage: string;
+  readonly context: Record<string, unknown>;
+  readonly details?: Record<string, unknown>;
+  readonly securityEvent?: string | false;
+  withContext(extra: Record<string, unknown>): this; // `context` に項目を足し、同じエラーを返す
+}
+
+interface AppErrorOptions {
+  code: ErrorCode;
+  publicMessage?: string;
+  severity?: Severity;
+  retryable?: boolean;
+  securityEvent?: string | false;
+  context?: Record<string, unknown>;
+  details?: Record<string, unknown>;
+  cause?: unknown;
+}
+```
+
+**例:**
+
+```ts
+import { AppError } from "resultlog";
+
+const e = new AppError("the ledger is out of balance", {
+  code: "data-loss",
+  context: { ledger: "L-7" }, // ログには出るが、クライアントには出ない
+  cause: original,            // 下で起きたことのスタックを保つ
+});
+e.severity;      // "ERROR"
+e.retryable;     // true
+e.publicMessage; // "DATA_LOSS"
+```
+
+- `severity` の既定は、コードが HTTP 5xx に対応するとき（`internal`、`unknown`、`data-loss`、`unimplemented`、`unavailable`、`deadline-exceeded`）は `"ERROR"`、それ以外は `"WARNING"` です。ERROR と CRITICAL は Error Reporting に送られ、WARNING は送られません。
+- `retryable` は、失敗したイベントを [`wrapEvent`](#wrapevent-function) が再 throw してリトライさせるかどうかを決めます。既定は `severity !== "WARNING"` です。この 2 つが食い違うときに指定してください。レート制限は通知するほどではないがリトライには値し、コードのバグは通知には値するがリトライしても直りません。
+- `securityEvent` は、クライアントに何を返すかにかかわらず、その失敗を actor 付きのセキュリティイベントとして記録します。`authz_fail` のような [OWASP Logging Vocabulary](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Vocabulary_Cheat_Sheet.html) の名前を使います。他人の注文へのリクエストに、注文の存在を明かさない `not-found` を返しつつ、その試みをログに残せます。指定がなければ、`permission-denied` と `unauthenticated` が `authz_fail` として扱われ、`securityEvent: false` でそれをやめられます。
+- `context` はログエントリの最上位にマージされます。`error.withContext({ orderId })` は、エラーが層を伝わる間に項目を足します。throw したエラーはスタックを保ち、`cause` のスタックも記録されます。
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+#### `InvalidInput` (class)
+
+zod のスキーマが入力を拒否したときに、アダプタが起こすエラーです。`invalid-argument`、WARNING で、セキュリティイベント `input_validation_fail` も記録されます（エンドポイントへのファジングを digest が見つけられます）。`details.issues` は zod の issues で、アプリは [`parseError`](#parseerror-function) でフォームの項目ごとのメッセージにできます。スキーマで表せない自前のチェックには、自分で作って返してください。
+
+**シグネチャ:**
+
+```ts
+class InvalidInput extends AppError {} // code: "invalid-argument", securityEvent: "input_validation_fail"
+```
+
+**例:**
+
+```ts
+import { err, ok } from "neverthrow";
+import { InvalidInput } from "resultlog";
+
+// スキーマでは表せないチェック
+const checkRange = (from: Date, to: Date) =>
+  to > from
+    ? ok({ from, to })
+    : err(new InvalidInput("終了が開始より前", { details: { issues: [{ path: ["to"], message: "開始より後にしてください" }] } }));
+```
+
+テストでは、アプリが受け取るものを確かめられます。
+
+```ts
+await expect(reserve(callableRequest({ sku: 1 }, { uid: "u1" }))).rejects.toMatchObject({
+  code: "invalid-argument",
+  details: { reason: "InvalidInput", issues: [{ path: ["sku"] }] },
+});
+```
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+#### `DeadlineExceeded` (class)
+
+[タイムアウトのガード](#タイムアウト)が、プラットフォームに強制終了される少し前に実行を終えるときのエラーです。`deadline-exceeded`、ERROR、リトライ可能です。このエラーを載せたエントリには、その時点までに集めた情報がすべて入っています。
+
+**シグネチャ:**
+
+```ts
+class DeadlineExceeded extends AppError {} // code: "deadline-exceeded", severity: "ERROR"
+```
+
+**例:**
+
+```ts
+import { configure, logContext } from "resultlog";
+
+configure({ timeoutSeconds: 60 }); // setGlobalOptions に渡した値と同じ
+
+// ガードが働いたら、止められる呼び出しも止める:
+const res = await fetch(url, { signal: logContext.signal });
+```
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+### 他のサービスの呼び出し
+
+#### `toExternalError` (function)
+
+あらゆる外部の失敗を [`ExternalError`](#externalerror-class) にします。エラーの形を読むので SDK は不要です。タイムアウト、ネットワーク障害、HTTP ステータス、gRPC のコードを扱います。ログには小さな `upstream` の要約（`status`、`code`、`type`、`requestId`、`retryAfterMs`）を足し、axios のリクエストのような大きなエラーオブジェクトはログに入れません。何がどうなるかの表は[外部 API](#外部-api)にあります。
+
+**シグネチャ:**
+
+```ts
+function toExternalError<P extends string>(
+  provider: P,
+  error: unknown,
+  classify?: (error: unknown, upstream: Upstream) => ExternalClassification | undefined,
+): ExternalError<P>;
+
+type ExternalClassification = Partial<Pick<AppErrorOptions, "code" | "severity" | "retryable" | "publicMessage" | "details" | "context">>;
+```
+
+**例:**
+
+```ts
+import { ResultAsync } from "neverthrow";
+import { toExternalError } from "resultlog";
+
+const createIntent = (params: Stripe.PaymentIntentCreateParams) =>
+  ResultAsync.fromPromise(stripe.paymentIntents.create(params), (e) =>
+    toExternalError("stripe", e, (_error, upstream) =>
+      upstream.type === "StripeCardError" ? { code: "failed-precondition", publicMessage: "カードが拒否されました。" } : undefined,
+    ),
+  );
+```
+
+`classify` は、特定のプロバイダでだけ意味を持つエラー用です。返したものが既定を上書きします。HTTP エラーでも resolve する `fetch` の、ok でない `Response` は、そのまま渡してください: `toExternalError("partner", res)`。
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+#### `ExternalError` (class)
+
+`toExternalError` が返すものです。誰がどう失敗したかを覚えている `AppError` です。
+
+**シグネチャ:**
+
+```ts
+class ExternalError<P extends string = string> extends AppError {
+  readonly provider: P;
+  readonly upstream: Upstream;
+}
+
+interface Upstream {
+  status?: number;
+  code?: string | number;
+  type?: string;
+  requestId?: string;    // プロバイダのサポートに伝える ID
+  retryAfterMs?: number; // プロバイダが Retry-After を返したとき
+}
+```
+
+**例:**
+
+```ts
+const result = await createIntent(params);
+if (result.isErr()) {
+  const { provider, upstream, retryable } = result.error;
+  // "stripe", { status: 429, requestId: "req_…", retryAfterMs: 2000 }, true
+}
+```
+
+プロバイダ名は型引数なので、SDK 自身がリトライする呼び出しを `retry()` でラップしようとすると、コンパイル時に拒否できます（[リトライを重ねない](#リトライを重ねない)を参照）。
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+#### `retry` (function)
+
+呼び出しが `retryable` なエラーで失敗したときにやり直し、呼び出しと同じように `ResultAsync` を返します。プロバイダが `Retry-After` を返したときはその時間だけ待ち、そうでなければジッター付きの指数バックオフを使います。冪等な呼び出しにだけ使ってください。
+
+**シグネチャ:**
+
+```ts
+function retry<T, E extends AppError, const O extends RetryOptions = {}>(
+  fn: () => Outcome<T, E>, // 型には、コンパイル時のガードも含まれる。「リトライを重ねない」を参照
+  options?: O,
+): ResultAsync<T, E>;
+
+interface RetryOptions {
+  attempts?: number;                // 最初の 1 回を含む合計回数。既定は 3
+  baseDelayMs?: number;             // 最初のバックオフの上限。倍々になる。既定は 200
+  maxDelayMs?: number;              // 1 回の待ちの最長。これより長い Retry-After ならリトライをやめる。既定は 2000
+  budgetMs?: number;                // 最初の試行の開始からこの時間を超えて次の待ちが終わるなら、やめる。既定は 5000
+  sdkRetriesDisabled?: boolean;     // SDK 自身のリトライを 0 にした
+  allowRepeatedRequests?: boolean;  // 呼び出しが意図して同じリクエストを繰り返す（ポーリング）
+}
+```
+
+**例:**
+
+```ts
+import { retry } from "resultlog";
+
+const getPartner = (url: string) => retry(() => fetchPartner(url), { attempts: 3, budgetMs: 3000 });
+```
+
+- ほかのリトライの層には決して重なりません。Stripe、OpenAI、Anthropic は、SDK のリトライを切って `sdkRetriesDisabled: true` を渡さない限り型エラーです。それ以外の呼び出しでは、1 回の試行の中で同じ HTTP リクエストが 2 回送られたことを実行時に検知して止めます。[リトライを重ねない](#リトライを重ねない)を読んでください。
+- [タイムアウトのガード](#タイムアウト)の期限を知っていて、それを超えて待ちません。
+- リトライした、あるいはしようとして止まった `retry()` は、エントリに `retries` として記録されます。
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+#### `fallback` (function)
+
+試行を順に試し、失敗が `retryable` のとき、つまりプロバイダ側に原因があるときだけ次へ進みます。リクエスト自体が間違っているなら、次のプロバイダでも拒否されるからです。見送った試行は、その番号付きで `handledErrors` に記録されます。
+
+**シグネチャ:**
+
+```ts
+function fallback<const A extends readonly [() => Outcome<any>, ...(() => Outcome<any>)[]]>(
+  ...attempts: A
+): ResultAsync<OutcomeOk<A[number]>, OutcomeErr<A[number]>>;
+```
+
+**例:**
+
+```ts
+import { fallback } from "resultlog";
+
+const answer = (prompt: string) =>
+  fallback(
+    () => askPrimary(prompt),   // それぞれ ResultAsync<Answer, ExternalError> を返す
+    () => askSecondary(prompt), // 1 つ目が、別のプロバイダに任せる価値のある失敗をしたときだけ試す
+  );
+```
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+### ハンドラ内でのログ
+
+ハンドラの中で `console.log` や `firebase-functions/logger` を使わず、`logContext` で実行の 1 本のエントリに情報を足してください。コンテキストは `AsyncLocalStorage` に載っているので、並行する実行が混ざることはありません。`set`、`debug`、`error`、`setActor` は、ラップされたハンドラの外では何もしません。`audit` と `security` は、外でも書き出します。
+
+#### `logContext.set` (method)
+
+実行の 1 本のログエントリに項目を足します。`andTee` と相性がよい書き方です。
+
+**シグネチャ:**
+
+```ts
+logContext.set(attrs: Record<string, unknown>): void;
+```
+
+**例:**
+
+```ts
+import { logContext } from "resultlog";
+
+findUser(id).andTee((user) => logContext.set({ plan: user.plan, region: user.region }));
+// → { "severity": "INFO", "message": "getuser ok 42 ms", "plan": "pro", "region": "eu", … }
+```
+
+値は[マスキング](#マスキング)を通ります。`password` や `token` のようなキー、API キー・JWT・カード番号のように見える値は置き換えられます。resultlog 自身が書く項目（`errorName`、`durationMs` など）と同じ名前の項目は、ライブラリ側の値で置き換えられます。[制限事項](#制限事項)を参照してください。
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+#### `logContext.debug` (method)
+
+パンくずをメモリに残します（最新の 50 件）。パンくずは、**実行が失敗したときだけ** `breadcrumbs` として書き出されます。何かが壊れたときに必要な詳細を、何も起きなかったときのログ代なしで手に入れるためのものです。
+
+**シグネチャ:**
+
+```ts
+logContext.debug(message: string, data?: Record<string, unknown>): void;
+```
+
+**例:**
+
+```ts
+logContext.debug("looking up user", { id });
+logContext.debug("cache miss", { key: `users/${id}` });
+// 失敗したとき: "breadcrumbs": [{ "timestamp": "…", "level": "DEBUG", "message": "looking up user", "data": { "id": "u9" } }, …]
+```
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+#### `logContext.error` (method)
+
+回復したエラー（フォールバックしたキャッシュミスなど）を `handledErrors` に記録します。実行は成功のままで、こうした実行はサンプリングで間引かれません。`orElse` と組み合わせて使います。
+
+**シグネチャ:**
+
+```ts
+logContext.error(error: unknown, data?: Record<string, unknown>): void;
+```
+
+**例:**
+
+```ts
+readFromCache(key).orElse((e) => {
+  logContext.error(e, { step: "cache" });
+  return readFromDb(key);
+});
+```
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+#### `logContext.audit` (method)
+
+actor と `audit` ラベル付きの監査エントリ（NOTICE）を**その場で**書き出します。実行の後のほうでタイムアウトやクラッシュが起きても残ります。実行の最後のエントリにも、同じイベントが結果と一緒に `auditEvents` として載ります。ラップされたハンドラの外でも使えます。[OWASP Logging Vocabulary](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Vocabulary_Cheat_Sheet.html) の名前が合うときはそれを使ってください: `authz_change`、`authz_admin`、`sensitive_read`、`sensitive_update`、`sensitive_delete`、`user_created`、`user_deleted`。
+
+**シグネチャ:**
+
+```ts
+logContext.audit(event: string, data?: Record<string, unknown>): void;
+```
+
+**例:**
+
+```ts
+logContext.audit("authz_change", { target: `users/${id}`, role: "admin" });
+```
+
+```json
+{
+  "severity": "NOTICE",
+  "message": "authz_change",
+  "auditEvent": "authz_change",
+  "target": "users/u9",
+  "role": "admin",
+  "actor": { "uid": "u1", "ip": "203.0.113.5", "userAgent": "Mozilla/5.0 …" },
+  "logging.googleapis.com/labels": { "audit": "true" }
+}
+```
+
+[セキュリティ監査と調査](#セキュリティ監査と調査)を参照してください。
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+#### `logContext.security` (method)
+
+actor と `security` ラベル付きで、セキュリティイベントをその場で記録します。何も失敗していないが記録を残す価値があるとき（`sensitive_read` など）に使います。無害なエラーで応答しつつ記録したいときは、代わりにエラーに `securityEvent` を宣言してください。イベントはどちらか一方の方法で記録し、両方では記録しません。
+
+**シグネチャ:**
+
+```ts
+logContext.security(
+  event: string,
+  data?: Record<string, unknown>,
+  options?: { severity?: "NOTICE" | "WARNING" | "ERROR" | "CRITICAL" }, // 既定は "WARNING"
+): void;
+```
+
+**例:**
+
+```ts
+logContext.security("sensitive_read", { collection: "payments", count: rows.length });
+logContext.security("authn_token_reuse", { appId }, { severity: "CRITICAL" });
+```
+
+[不正アクセスの検知](#不正アクセスの検知)を参照してください。
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+#### `logContext.setActor` (method)
+
+リクエストを誰が行ったかの記録に、項目を足します。`wrapCall` は uid、サインインのプロバイダ、App Check、アドレスを自分で入れます。`onRequest` では何も検証されないので、自分で確認した uid を足してください。
+
+**シグネチャ:**
+
+```ts
+logContext.setActor(fields: Record<string, unknown>): void;
+```
+
+**例:**
+
+```ts
+const decoded = await getAuth().verifyIdToken(token);
+logContext.setActor({ uid: decoded.uid });
+```
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+#### `logContext.llm` (method)
+
+LLM 呼び出しを記録します。トークン数、モデル、終了理由を、どの SDK のレスポンスからでも、キーが何を言っているかで読み取ります（提供元の一覧は持ちません）。ストリームを渡すと、同じチャンクを返しつつ、最初のチャンクまでの時間とストリームが途中で切れたかどうかも記録します。渡したものをそのまま返すので、チェーンの途中にも置けます。
+
+**シグネチャ:**
+
+```ts
+logContext.llm<T>(response: T, explicit?: LlmCall): T;
+logContext.llm<C>(stream: AsyncIterable<C>, explicit?: LlmCall): AsyncGenerator<C, void, undefined>;
+
+interface LlmCall {
+  model?: string;
+  finishReason?: string;
+  ttftMs?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+  cachedTokens?: number;
+  cacheWriteTokens?: number;
+  reasoningTokens?: number;
+}
+```
+
+**例:**
+
+```ts
+const completion = await client.chat.completions.create({ model: "gpt-4o-mini", messages });
+logContext.llm(completion);
+
+for await (const chunk of logContext.llm(stream)) send(chunk);
+
+logContext.llm(response, { model: "my-alias", inputTokens: 1200 }); // 読み取れないものは自分で渡す
+```
+
+数値の読み取り方、途中で切れた・差し控えられたの判定、呼び出しの価格の付け方は、[LLM の呼び出し](#llm-の呼び出し)を参照してください。
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+#### `logContext.signal` (property)
+
+[タイムアウトのガード](#タイムアウト)が実行を打ち切る直前に abort される `AbortSignal` です。ハンドラ自体は止められないので、止められる呼び出しにこのシグナルを渡してください。ラップされたハンドラの外では undefined です。
+
+**シグネチャ:**
+
+```ts
+logContext.signal: AbortSignal | undefined;
+```
+
+**例:**
+
+```ts
+const res = await fetch(url, { signal: logContext.signal });
+const completion = await client.messages.create(params, { signal: logContext.signal });
+```
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+### 設定
+
+#### `configure` (function)
+
+ライブラリの動作を設定します。起動時に、最初の実行より前に 1 回呼びます。後からもう一度呼ぶと、名前を挙げたオプションだけが変わります。
+
+**シグネチャ:**
+
+```ts
+function configure(options: LogOptions): void;
+
+interface LogOptions {
+  /** 速く終わった成功ログを残す割合（0〜1）。既定は 1。失敗、遅い実行、監査、その他の注目すべき実行は常に残る。 */
+  successSampleRate?: number;
+  /** これ以上遅い成功（ms）は常に残る。既定は 1000。 */
+  slowMs?: number;
+  /** 関数のタイムアウト（秒）。プラットフォームは公開していない。指定するとタイムアウトのガードが有効になる。 */
+  timeoutSeconds?: number;
+  /** タイムアウトの何ミリ秒前にガードが介入するか。既定は 1000。 */
+  timeoutMarginMs?: number;
+  /** 実行中の外部 HTTP 呼び出しを、ホストごとに要約する。既定は true。 */
+  recordExternalCalls?: boolean;
+  /** 組み込みのパターンに加えてマスクするパターン。一致した部分は "[REDACTED:custom]" になる。 */
+  secretPatterns?: RegExp[];
+  /** LLM 呼び出し 1 回の価格（単位は自由）。合計が `llm.cost`。価格を付けられない呼び出しは undefined を返す。 */
+  price?: (call: LlmCall) => number | undefined;
+  /** "security"（既定）: actor は監査・セキュリティのエントリにだけ載る。"all": 全エントリに載る。 */
+  actor?: "security" | "all";
+  /** プラットフォームのロガーの代わりに、全エントリを受け取る。throw する sink は無視される。 */
+  sink?: (entry: LogEntry) => void;
+}
+```
+
+**例:**
+
+```ts
+import { setGlobalOptions } from "firebase-functions/v2";
+import { configure } from "resultlog";
+
+setGlobalOptions({ timeoutSeconds: 60 }); // プラットフォームの設定
+configure({
+  timeoutSeconds: 60,       // resultlog にも同じ値を伝える
+  successSampleRate: 0.1,   // 速い成功ログの 10% を残す
+  slowMs: 1000,
+  secretPatterns: [/internal-\d{6}/],
+});
+```
+
+`sink` は、プラットフォームのロガーの代わりに全エントリを受け取ります。エントリを別の場所に送るときや、ローカル開発で表示するときに使ってください。各オプションの説明は、[タイムアウト](#タイムアウト)、[ログの費用](#ログの費用)、[マスキング](#マスキング)、[LLM の呼び出し](#llm-の呼び出し)（`price`）、[誰が呼んだか](#誰が呼んだか)（`actor`）、[テスト](#テスト)（`sink`）にあります。
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+### 重複防止
+
+#### `firestoreIdempotency` (function)
+
+イベントトリガーは「少なくとも 1 回」配信です。これを使うと、ハンドラはイベントごとに 1 回だけ動きます。最初の配信が Firestore のトランザクションでイベントを確保（claim）し、再配信は処理済みを見つけてハンドラを飛ばします（`duplicate: true` をログに残します）。確保、失敗、リースの挙動は[重複イベント](#重複イベント)にあります。
+
+**シグネチャ:**
+
+```ts
+function firestoreIdempotency(
+  db: Pick<Firestore, "collection" | "runTransaction">,
+  options?: { collection?: string; ttlMs?: number }, // 既定は "_resultlog_events" と 7 日
+): IdempotencyStore;
+
+interface IdempotencyStore {
+  claim(key: string, leaseMs: number): Promise<"claimed" | "done" | "in-flight">;
+  complete(key: string): Promise<void>;
+  release(key: string): Promise<void>;
+}
+```
+
+**例:**
+
+```ts
+import { getFirestore } from "firebase-admin/firestore";
+import type { CloudEvent } from "firebase-functions/v2";
+import { type MessagePublishedData, onMessagePublished } from "firebase-functions/v2/pubsub";
+import { firestoreIdempotency, wrapEvent } from "resultlog";
+
+const idempotency = firestoreIdempotency(getFirestore());
+
+export const onPayment = onMessagePublished("payments", wrapEvent((event: CloudEvent<MessagePublishedData>) => charge(event), { idempotency }));
+```
+
+ほかのストアでも使えます。`IdempotencyStore` を実装してください。
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+### ユーティリティ
+
+#### `fingerprint` (function)
+
+失敗の種類に名前を付ける、16 進 12 文字の ID です。失敗のエントリにはすべて入るので、これで数えたり、まとめたり、検索したりできます（`jsonPayload.fingerprint="b49c01a8ca7b"`）。`resultlog digest` もこれでレポートをまとめます。エラーの名前とコード、発生箇所（行ではなく関数とファイルなので、デプロイで変わりません）、外部の失敗ならプロバイダとステータスの種類から作られます。メッセージには ID が入るので、含めません。
+
+**シグネチャ:**
+
+```ts
+function fingerprint(error: AppError): string;
+```
+
+**例:**
+
+```ts
+import { defineError, fingerprint } from "resultlog";
+
+class UserNotFound extends defineError("UserNotFound", { code: "not-found" }) {}
+
+const lookup = (id: string) => new UserNotFound(`users/${id} does not exist`);
+fingerprint(lookup("u9")); // "b49c01a8ca7b"
+fingerprint(lookup("u1")); // "b49c01a8ca7b": 同じ種類の失敗
+```
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+### テスト
+
+`resultlog/testing` には、ハンドラのテストに必要なものがあります。エントリは自分で制御できる sink に集まるので、ハンドラが何をログに出したかをテストで検証できます。ラップされたハンドラ自体を呼ぶか（`const getUser = wrapCall(…)`）、Firebase 自身のラッパーを通すなら `onCall(getUser).run(request)` を呼びます。
+
+```ts
+import { afterEach, expect, test } from "bun:test";
+import { callableRequest, captureLogs } from "resultlog/testing";
+
+const logs = captureLogs();
+// getUser は wrapCall が返したハンドラ（onCall(…) で Firebase 用に包む前のもの）
+afterEach(() => logs.clear());
+
+test("存在しないユーザーは警告になり、クライアントには理由が伝わる", async () => {
+  await expect(getUser(callableRequest({ id: "u9" }, { uid: "u1" }))).rejects.toMatchObject({
+    code: "not-found",
+    details: { reason: "UserNotFound" },
+  });
+  expect(logs.entries).toMatchObject([{ severity: "WARNING", errorName: "UserNotFound", authUid: "u1" }]);
+});
+```
+
+#### `captureLogs` (function)
+
+[`configure({ sink })`](#configure-function) を設定して、エントリを表示せずに集めます。`clear()` はテストの合間にリストを空にし、`restore()` は元の sink に戻します。sink がなければ、エントリはこれまでどおり `firebase-functions/logger` に出ます。
+
+**シグネチャ:**
+
+```ts
+function captureLogs(): CapturedLogs;
+
+interface CapturedLogs {
+  readonly entries: LogEntry[];
+  clear(): void;
+  restore(): void;
+}
+```
+
+**例:**
+
+```ts
+const logs = captureLogs();
+await getUser(callableRequest({ id: "u1" }, { uid: "u1" }));
+logs.entries[0]; // { severity: "INFO", message: "ok 3 ms", authUid: "u1", durationMs: 3, … }（K_SERVICE があれば、メッセージは関数名で始まる）
+logs.restore();
+```
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+#### `callableRequest` (function)
+
+`onCall` のハンドラが受け取るリクエストを作ります。渡した uid の `auth`（なければ auth なし）、アドレス、ユーザーエージェントが入り、`app` を渡せば App Check の結果も入ります。
+
+**シグネチャ:**
+
+```ts
+function callableRequest<T = unknown>(
+  data?: T,
+  options?: {
+    uid?: string;
+    token?: Record<string, unknown>; // ID トークンのクレーム。例: { admin: true }
+    ip?: string;                      // 既定は "127.0.0.1"
+    app?: { appId: string; alreadyConsumed?: boolean }; // alreadyConsumed: 再利用されたトークン
+  },
+): CallableRequest<T>;
+```
+
+**例:**
+
+```ts
+const admin = callableRequest({ id: "u9" }, { uid: "u1", token: { admin: true } });
+const replayed = callableRequest({}, { uid: "u1", app: { appId: "1:123:web:abc", alreadyConsumed: true } });
+```
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+#### `httpExchange` (function)
+
+`wrapRequest` のハンドラ用に、リクエストとレスポンスを作ります。`sent` には、ハンドラが返したステータスと本文が記録されます。
+
+**シグネチャ:**
+
+```ts
+function httpExchange(options?: {
+  method?: string;                    // 既定は "GET"
+  path?: string;                      // 既定は "/"
+  body?: unknown;
+  headers?: Record<string, string>;
+}): { req: Request; res: Response; sent: { status?: number; body?: unknown } };
+```
+
+**例:**
+
+```ts
+const handler = wrapRequest((req) => ok({ received: req.body.id }));
+const { req, res, sent } = httpExchange({ method: "POST", path: "/webhook", body: { id: "evt_1" } });
+await handler(req, res);
+sent; // { status: 200, body: { received: "evt_1" } }
+```
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+#### `cloudEvent` (function)
+
+`wrapEvent` のハンドラ用に CloudEvent を作ります。本物のトリガーが配信する id と時刻が入ります。
+
+**シグネチャ:**
+
+```ts
+function cloudEvent<T>(data: T, options?: Partial<CloudEvent<T>>): CloudEvent<T>; // id、type、source、time
+```
+
+**例:**
+
+```ts
+const handler = wrapEvent((event: CloudEvent<{ id: string }>) => processOrder(event.data.id));
+await handler(cloudEvent({ id: "o1" }, { id: "evt-1" }));
+await handler(cloudEvent({ id: "o1" }, { id: "evt-1" })); // 同じ id をもう一度: 再配信
+```
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+#### `authBlockingEvent` (function)
+
+ブロッキング関数が受け取るイベントを作ります。既定はサインインです。サインアップにするには、`beforeCreate:<provider>` で終わる `eventType` を渡してください。
+
+**シグネチャ:**
+
+```ts
+function authBlockingEvent(options?: {
+  uid?: string;
+  ipAddress?: string;
+  userAgent?: string;
+  eventType?: string;
+  eventId?: string;
+}): AuthBlockingEvent;
+```
+
+**例:**
+
+```ts
+const policy = wrapBlocking((event) => (isDenied(event.ipAddress) ? err(new BlockedAddress("拒否リストにある")) : ok()));
+await expect(policy(authBlockingEvent({ ipAddress: "198.51.100.9" }))).rejects.toMatchObject({ code: "permission-denied" });
+```
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+### アプリ側で
+
+`resultlog/client` は、失敗した呼び出しを画面が必要とする形にします。サーバー側の import を含まないので、ブラウザのバンドルに入れても安全です。
+
+```ts
+import { httpsCallable } from "firebase/functions";
+import { parseError } from "resultlog/client";
+
+try {
+  await httpsCallable(functions, "createUser")(form);
+} catch (e) {
+  const error = parseError(e);
+  if (error.reason === "EmailTaken") showMessage(t("emailTaken")); // エラーの名前で表示する文言を選ぶ
+  else if (Object.keys(error.fieldErrors).length > 0) showFieldErrors(error.fieldErrors); // zod の issues を項目ごとに
+  else if (error.retryable) showRetryButton();
+  else showMessage(error.message);
+}
+```
+
+#### `parseError` (function)
+
+アプリで callable が throw したエラー（Firebase JS SDK の `FunctionsError`）を読み、`ClientError` を返します。何を渡されても throw しません。callable のエラーでないもの（ネットワーク障害など）は、そのメッセージ付きの `code: "unknown"` になります。
+
+**シグネチャ:**
+
+```ts
+function parseError(error: unknown): ClientError;
+
+interface ClientError {
+  code: string;                           // `functions/` の接頭辞を除いた Firebase のコード
+  reason?: string;                        // サーバー側のエラーの名前。例: "EmailTaken"（defineError で作った WARNING エラー）
+  message: string;                        // 公開用メッセージ
+  details: Record<string, unknown>;       // サーバーが送ったそのほかの情報
+  issues: ClientIssue[];                  // InvalidInput の zod の issues
+  fieldErrors: Record<string, string[]>;  // 同じものを項目ごとのメッセージにしたもの: { "address.zip": ["Too small"] }。"_form" はフォーム全体
+  retryable: boolean;                     // unavailable、deadline-exceeded、resource-exhausted、aborted
+}
+
+interface ClientIssue {
+  path: (string | number)[];
+  message: string;
+  code?: string;
+}
+```
+
+**例:**
+
+```ts
+const error = parseError(e);
+error.code;        // "invalid-argument"
+error.fieldErrors; // { quantity: ["Number must be greater than 0"] }
+```
+
+`retryable` は、サーバーが後の試行で成功するかもしれないという意味です。自動でリトライするのは、繰り返しても安全なものだけにしてください。
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+#### `parseErrorBody` (function)
+
+`wrapRequest` でラップした `onRequest` 関数の応答にも、同じことをします。パース済みの JSON 本文を渡してください。
+
+**シグネチャ:**
+
+```ts
+function parseErrorBody(body: unknown): ClientError;
+```
+
+**例:**
+
+```ts
+const response = await fetch("/api/orders", { method: "POST", body: JSON.stringify(form) });
+if (!response.ok) {
+  const error = parseErrorBody(await response.json());
+  showMessage(error.message);
+}
+```
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+### Digest
+
+`resultlog/digest` は、1 日分の Cloud Logging のエントリを、AI アシスタントに渡せる大きさのレポートにし、検知ルールをかけます。[`resultlog digest`](#resultlog-digest-command) が使うのはこれです。
+
+#### `parseLogs` (function)
+
+`gcloud logging read --format=json` が返すもの（JSON の配列）、またはログのエクスポートのような 1 行 1 JSON を読みます。JSON でない行は、数えるだけで失敗にはしません。
+
+**シグネチャ:**
+
+```ts
+function parseLogs(text: string): { logs: unknown[]; skipped: number };
+```
+
+**例:**
+
+```ts
+import { readFileSync } from "node:fs";
+import { parseLogs } from "resultlog/digest";
+
+const { logs, skipped } = parseLogs(readFileSync("logs.json", "utf8"));
+```
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+#### `digest` (function)
+
+レポートを、データと Markdown の両方で返します。検知ルールの findings、`fingerprint` ごとの失敗グループ、セキュリティイベントとその actor、遅い・失敗しているホスト、LLM の使用量、信頼性（サンプリングされた成功ログは重み付きで数えます）が入ります。レポートの中身は [AI アシスタントと調べる](#ai-アシスタントと調べる)、ルールは[不正アクセスの検知](#不正アクセスの検知)を参照してください。
+
+**シグネチャ:**
+
+```ts
+function digest(logs: unknown[], options?: DigestOptions): { data: Digest; markdown: string };
+
+interface DigestOptions {
+  top?: number;                         // 各リストの項目数。既定は 10
+  maxChars?: number;                    // Markdown の上限。既定は 20000
+  pseudonymize?: boolean;               // uid、アドレス、ユーザーエージェントを、安定した仮名にする
+  admins?: string[];                    // 権限やアカウントを変更してよい uid
+  thresholds?: Record<string, number>;  // ルールのしきい値を変える: { "authz-probing": 5 }
+  rules?: Rule[];                       // 自分のルール
+}
+
+interface Rule {
+  name: string;
+  severity: "info" | "low" | "medium" | "high";
+  summary: string;
+  hint: string;
+  filter(probe: Probe): boolean;        // 数えるエントリ
+  key(probe: Probe): string | undefined; // key ごとに数える（actor、アドレスなど）
+  distinct?(probe: Probe): string | undefined; // エントリ数ではなく、異なる値の数を数える
+  threshold: number;
+  windowMs?: number;
+}
+```
+
+**例:**
+
+```ts
+import { digest } from "resultlog/digest";
+
+const { data, markdown } = digest(logs, {
+  pseudonymize: true,
+  admins: ["u1"],
+  rules: [
+    {
+      name: "night-admin",
+      severity: "medium",
+      summary: "夜間に管理上の変更が行われた。",
+      hint: "本人によるものか、管理者に確認する。",
+      filter: (p) => p.kind === "audit" && new Date(p.time ?? 0).getUTCHours() < 5,
+      key: (p) => p.uid,
+      threshold: 1,
+    },
+  ],
+});
+data.findings; // [{ rule: "night-admin", severity: "medium", subject: "u1", count: 1, … }]
+```
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+### Cloud Monitoring のファイル
+
+`resultlog/monitoring` は、[Cloud Monitoring](#cloud-monitoring) のログベース指標、アラートポリシー、ダッシュボードを、普通のオブジェクトと、`gcloud` が受け取るファイルとして作ります。データを作るだけで、Google Cloud にはつながりません。
+
+#### `monitoring` (function)
+
+指標、アラートポリシー、ダッシュボードをオブジェクトで返します。Terraform、Pulumi、CDK でリソースを組み立てるのに使えます。
+
+**シグネチャ:**
+
+```ts
+function monitoring(options: MonitoringOptions): { metrics: Record<string, LogMetric>; alerts: Record<string, AlertPolicy>; dashboard: Record<string, any> };
+
+interface MonitoringOptions {
+  project: string;                            // Google Cloud のプロジェクト ID
+  prefix?: string;                            // 名前の接頭辞。既定は "resultlog"
+  services?: string[];                        // その関数だけを対象にする（Cloud Run のサービス名。関数名を小文字にしたもの）
+  notificationChannels?: string[];            // "projects/PROJECT/notificationChannels/ID"
+  thresholds?: Partial<Record<"errors" | "security-events" | "timeouts" | "llm-problems", number>>;
+}
+```
+
+**例:**
+
+```ts
+import { monitoring } from "resultlog/monitoring";
+
+const { alerts } = monitoring({ project: "my-project", services: ["checkout"], thresholds: { errors: 10 } });
+Object.keys(alerts); // ["server-errors", "security-events", "token-replay", …, "rules-changed", "iam-changed", …]
+```
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+#### `files` (function)
+
+`resultlog monitoring` が書き出すファイルの一式を、パスごとに返します。`metrics/*.json`、`alerts/*.json`、`dashboard.json`、そして適用する `gcloud` コマンドを説明する `README.md` です。
+
+**シグネチャ:**
+
+```ts
+function files(options: MonitoringOptions): Record<string, string>;
+```
+
+**例:**
+
+```ts
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { files } from "resultlog/monitoring";
+
+for (const [path, content] of Object.entries(files({ project: "my-project" }))) {
+  mkdirSync(dirname(join("monitoring", path)), { recursive: true });
+  writeFileSync(join("monitoring", path), content);
+}
+```
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+### コマンドライン
+
+パッケージは `resultlog` というコマンドを 1 つ入れます。
+
+#### `resultlog digest` (command)
+
+Cloud Logging のエントリ（JSON の配列、または 1 行 1 JSON）をファイルまたは標準入力から読み、[digest](#digest-function) を出力します。
+
+**使い方:**
+
+```sh
+resultlog digest [file] [options]
+
+  --format markdown|json   出力形式（既定は markdown）
+  --top N                  セクションごとに載せる項目数（既定は 10）
+  --max-chars N            Markdown の上限（既定は 20000）
+  --pseudonymize           uid、IP アドレス、ユーザーエージェントを仮名に置き換える
+  --admins uid1,uid2       権限やアカウントを変更してよい uid。それ以外による変更は高い重大度の finding になる
+  --threshold rule=N       検知ルールのしきい値を変える（繰り返し指定できる）
+```
+
+**例:**
+
+```sh
+gcloud logging read 'resource.type="cloud_run_revision"' --freshness=1d --limit=3000 --format=json \
+  | npx resultlog digest --pseudonymize > digest.md
+```
+
+[⬆️ 先頭へ](#目次)
+
+---
+
+#### `resultlog monitoring` (command)
+
+[Cloud Monitoring のファイル](#files-function)をディレクトリに書き出します。書くのはファイルだけで、Google Cloud にはつながりません。適用する `gcloud` コマンドは、書き出される `README.md` に載っています。
+
+**使い方:**
+
+```sh
+resultlog monitoring --project PROJECT [options]
+
+  --project ID                  Google Cloud のプロジェクト ID（必須）
+  --out DIR                     ファイルの出力先（既定は ./monitoring）
+  --service a,b                 その関数だけを対象にする（Cloud Run のサービス名）
+  --notification-channel NAME   アラートの通知先。projects/PROJECT/notificationChannels/ID（繰り返し指定できる）
+  --threshold name=N            errors、security-events、timeouts、llm-problems（繰り返し指定できる）
+  --prefix NAME                 名前の接頭辞（既定は resultlog）
+```
+
+**例:**
+
+```sh
+npx resultlog monitoring --project my-project \
+  --notification-channel projects/my-project/notificationChannels/1234567890
+```
+
+[⬆️ 先頭へ](#目次)
+
+---
 
 ## タイムアウト
 
@@ -124,42 +1508,6 @@ configure({ timeoutSeconds: 60 });         // resultlog 用に同じ値を指定
 - `retry()` は期限を認識します。期限を過ぎてまで待つことはなく、期限を過ぎたら次の試行を始めません。
 - 関数ごとに別のタイムアウトを指定する場合: `wrapCall(fn, { timeoutSeconds: 300 })`、`wrapRequest(fn, { timeoutSeconds: 300 })`、`wrapEvent(fn, { timeoutSeconds: 300 })`。`timeoutSeconds` がなければガードは働きません。
 - 打ち切られた関数について、そのログが「何をしていたか」の唯一の記録になります。バックグラウンドで続く処理は記録されません。
-
-## ハンドラ内でのログ
-
-- `logContext.set(attrs)` は、その実行の 1 本のログに項目を追加します。`andTee` と組み合わせると便利です: `.andTee((user) => logContext.set({ plan: user.plan }))`
-- `logContext.debug(message, data?)` はパンくずをメモリに保持します（最新 50 件）。パンくずは、実行が失敗したときだけ `breadcrumbs` として書き出されます。
-- `logContext.error(error, data?)` は、回復済みのエラー（キャッシュの失敗から別経路に切り替えた場合など）を `handledErrors` に記録します。実行自体は成功のままです。`orElse` と組み合わせて使います: `.orElse((e) => { logContext.error(e, { step: "cache" }); return readFromDb(); })`
-- `logContext.audit(event, data?)` は監査ログを即座に書き出します（[セキュリティ監査](#セキュリティ監査と調査)を参照）。ラップしたハンドラの外でも動きます。
-- `logContext.security(event, data?, { severity? })` は、セキュリティイベントを actor と `security` ラベル付きですぐに書き出します（[不正アクセスの検知](#不正アクセスの検知)を参照）。何も失敗していないが記録を残したい場所で使います。たとえば `sensitive_read` です。
-- `logContext.setActor(fields)` は、リクエストした人の情報を追加します。たとえば `onRequest` で自分で検証した uid を記録するときに使います。
-
-`set`、`debug`、`error`、`setActor` は、ラップしたハンドラの外では何もしません。コンテキストは `AsyncLocalStorage` に保持されるため、同時に走る実行同士で混ざることはありません。
-
-## テスト
-
-`resultlog/testing` に、ハンドラのテストに必要なものがあります。ログのエントリは自分で制御できる出力先（sink）に送られるので、テストでハンドラが何をログに出したかを検証できます。
-
-```ts
-import { afterEach, expect, test } from "bun:test";
-import { callableRequest, captureLogs } from "resultlog/testing";
-
-const logs = captureLogs();
-afterEach(() => logs.clear());
-
-test("存在しないユーザーは警告になり、クライアントには理由が伝わる", async () => {
-  await expect(getUser(callableRequest({ id: "u9" }, { uid: "u1" }))).rejects.toMatchObject({
-    code: "not-found",
-    details: { reason: "UserNotFound" },
-  });
-  expect(logs.entries).toMatchObject([{ severity: "WARNING", errorName: "UserNotFound", authUid: "u1" }]);
-});
-```
-
-- `captureLogs()` がエントリを集めます。`clear()` でテストごとに空にでき、`restore()` で元の sink に戻します。
-- `callableRequest(data, { uid, token, ip })`、`httpExchange({ method, path, body, headers })`（`{ req, res, sent }` を返し、`sent` にハンドラが返したステータスと本文が記録されます）、`cloudEvent(data, { id, type, time })` が、`wrapCall`・`wrapRequest`・`wrapEvent` への入力を作ります。
-- 包んだハンドラ自体（`const getUser = wrapCall(...)`）を呼ぶか、Firebase 自身のラッパーを通したいなら `onCall(getUser).run(request)` を使います。
-- 裏にあるオプションは `configure({ sink })` です。sink は、プラットフォームのロガーの代わりにすべてのエントリを受け取ります。エントリを別の場所へ送ったり、ローカル開発で画面に出したりするのにも使えます。sink が例外を投げても無視されます。ログがログ対象のコードを壊してはならないからです。
 
 ## 出力されるログ
 
@@ -223,50 +1571,6 @@ test("存在しないユーザーは警告になり、クライアントには�
 - **Error Reporting の `context`。** ERROR と CRITICAL のエントリには `context.user`（Firebase の uid）と `context.httpRequest`（`method`、`url`、`responseStatusCode`。`remoteIp` と `userAgent` は同じ規則）も付きます。Error Reporting が、エラーに紐づくユーザーとリクエストとして文書化しているフィールドです。イベントにはどちらもないので `context` は付きません。
 
 `httpRequest` を持つエントリを Logs Explorer がどう要約するか、`context` から Error Reporting が何を表示するかは、実プロジェクトでは確認していません。
-
-## エラー
-
-`defineError(name, { code, publicMessage?, severity?, retryable? })` は `AppError` のサブクラスを返します。名前付きのクラスで継承すると、エディタのホバーや型エラーに無名クラスではなく `UserNotFound` と表示されます。
-
-```ts
-class UserNotFound extends defineError("UserNotFound", { code: "not-found", publicMessage: "ユーザーが見つかりません。" }) {}
-const e = new UserNotFound("users/u9 does not exist", { cause, context: { id: "u9" } });
-e instanceof UserNotFound; // true
-e.name; // "UserNotFound"（リテラル型なので、エラーの union を name で絞り込める）
-```
-
-- `message` は内部向けで、ログにだけ出ます。
-- `publicMessage` はクライアント向けのメッセージです。省略時は `"NOT_FOUND"` のような正規のステータス名になります。
-- WARNING のエラーは、クライアントに `details` も返します。名前付きのエラー（`defineError` で作ったものと `ExternalError`）には `reason: error.name` が含まれるので、同じコードのエラー（たとえば 2 種類の `already-exists`）を区別したり、クライアント側で翻訳した文言を選んだりできます。`details` はどのエラーにも指定できるオプションで、公開される情報なので秘密情報は入れないでください。ERROR と CRITICAL のエラーは、`publicMessage` 以外をクライアントに返しません。
-- `severity` は、コードが HTTP 5xx に対応する場合（`internal`、`unknown`、`data-loss`、`unimplemented`、`unavailable`、`deadline-exceeded`）は `"ERROR"`、それ以外は `"WARNING"` が既定です。ERROR と CRITICAL は Error Reporting に送られ、WARNING は送られません。
-- `retryable` は、失敗したイベントを `wrapEvent` が再 throw してリトライさせるかどうかを決めます。既定は `severity !== "WARNING"` です。両者が食い違う場合に指定してください。たとえばレート制限は通知するほどではないがリトライはしたいもの、コードのバグは通知すべきだがリトライしても直らないものです。
-- `securityEvent` は、クライアントに何を返すかにかかわらず、その失敗をセキュリティイベントとして actor 付きで記録します。`authz_fail` のような [OWASP Logging Vocabulary](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Vocabulary_Cheat_Sheet.html) の名前を指定します。他人の注文へのアクセスには `not-found` を返して注文の存在を知らせず、それでも試行は記録できます。指定がなければ、`permission-denied` と `unauthenticated` は `authz_fail` として扱われます。`securityEvent: false` でこれを無効にできます。
-- `error.withContext({ orderId })` で、エラーが層をさかのぼる途中に項目を追加できます。
-- 一度しか使わないエラーには `new AppError(message, { code, publicMessage?, severity?, retryable?, context?, details?, cause? })` を使ってください。
-
-## アプリ側で
-
-`resultlog/client` は、失敗した呼び出しを画面が必要とする形に変換します。サーバー側のモジュールを import しないので、ブラウザ向けのバンドルに含めても安全です。
-
-```ts
-import { httpsCallable } from "firebase/functions";
-import { parseError } from "resultlog/client";
-
-try {
-  await httpsCallable(functions, "createUser")(form);
-} catch (e) {
-  const error = parseError(e);
-  if (error.reason === "EmailTaken") showMessage(t("emailTaken")); // エラーの名前で表示する文言を選ぶ
-  else if (Object.keys(error.fieldErrors).length > 0) showFieldErrors(error.fieldErrors); // zod の issues を項目ごとに
-  else if (error.retryable) showRetryButton();
-  else showMessage(error.message);
-}
-```
-
-- `code` は `functions/` の接頭辞を除いた Firebase のコードです。`reason` はサーバー側のエラーの名前（`"EmailTaken"`）で、`defineError` で作った WARNING のエラーについてサーバーが送ります。`message` は公開用メッセージ、`details` はサーバーが送ったその他の情報です。
-- `issues` は `InvalidInput` の zod の issues、`fieldErrors` はそれを項目ごとのメッセージにしたものです: `{ "address.zip": ["Too small"] }`。フォーム全体に関する問題は `"_form"` に入ります。
-- `retryable` は `unavailable`、`deadline-exceeded`、`resource-exhausted`、`aborted` のときに true です。あとでやり直せば成功するかもしれない失敗です。自動でやり直すのは、繰り返しても安全な呼び出しだけにしてください。
-- `wrapRequest` で包んだ `onRequest` の関数には `parseErrorBody(await response.json())` を使います。
 
 ## 外部 API
 
@@ -530,10 +1834,7 @@ gcloud logging sinks create security-audit \
 gcloud logging buckets update security-audit --location=global --locked
 ```
 
-通知の設定にコードは不要です:
-
-- 拒否の回数を数える: `gcloud logging metrics create authz-fail --log-filter='labels.security="authz_fail"'` を実行し、その指標に Cloud Monitoring のアラートを設定します（例: 5 分間に 20 回を超えたら通知）。
-- 危険な管理操作を見張る: ログベースのアラートを作り、フィルタを `protoPayload.methodName:"SetIamPolicy" OR protoPayload.methodName="google.iam.admin.v1.CreateServiceAccountKey"` などにします。
+これらを記録するために、関数側で変えるものはありません。そして `resultlog monitoring` が、特に大事なものにはアラートを生成します。Security Rules のデプロイ、IAM ポリシーの変更、サービスアカウントキーの作成、Firebase や API キーの設定の変更です。[プロジェクト自体への変更](#プロジェクト自体への変更)を参照してください。拒否の回数は resultlog 自身のエントリの指標になります: `gcloud logging metrics create authz-fail --log-filter='labels.security="authz_fail"'` を実行し、その指標に Cloud Monitoring のアラートを設定します（例: 5 分間に 20 回を超えたら通知）。
 
 ログエクスプローラでの調査クエリ:
 
@@ -573,18 +1874,10 @@ resultlog は、関数から見えるものを、セキュリティツールが�
 
 ### サインイン: wrapBlocking
 
-```ts
-import { beforeUserSignedIn } from "firebase-functions/v2/identity";
+[`wrapBlocking`](#wrapblocking-function) は、Identity Platform の `beforeUserSignedIn` と `beforeUserCreated` を記録に載せます。通ったサインインはすべて監査イベント `authn_login_success`（サインアップは `user_created`）になり、拒否はセキュリティイベント `authn_login_fail` になります。
 
-export const onSignIn = beforeUserSignedIn(
-  wrapBlocking((event) => (isDenied(event.ipAddress) ? err(new BlockedAddress("on the deny list")) : ok({ sessionClaims: { plan: "free" } }))),
-);
-```
-
-- 通ったサインインはすべて監査イベント `authn_login_success`（サインアップは `user_created`）として、アドレス、ユーザーエージェント、サインイン方式とともに記録されます。`AppError` を返すとサインインを拒否します。Firebase には `HttpsError` が渡り、ログには `authn_login_fail`（エラーが `securityEvent` を指定していればそれ）が残ります。成功時に `fn` が返したもの（カスタムクレーム、`disabled` など）は Firebase に渡されます。
-- プロジェクトを Identity Platform 付きの Firebase Authentication にアップグレードしている必要があります。Firebase はブロッキング関数に 7 秒を与えるので、ここではグローバルのタイムアウトにかかわらず、タイムアウトのガードの既定が 7 秒になります。
 - ポリシーが壊れた（例外、タイムアウト）場合は、サインインを拒否します。ブロッキング関数が壊れると全員がサインインできなくなるため、`failOpen: true` を指定すると、失敗を記録した上でサインインを通します。ポリシーが意図して返した拒否は、常に尊重されます。
-- 認証情報の検証が済んだ後に動くので、間違ったパスワードはここには来ません。Auth エミュレータでは、アドレスとユーザーエージェントは仮の値です。
+- プロジェクトを Identity Platform 付きの Firebase Authentication にアップグレードしている必要があります。認証情報の検証が済んだ後に動くので、間違ったパスワードはここには来ません。
 
 ### アラート
 
@@ -636,7 +1929,6 @@ const { data } = digest(logs, {
 - **位置情報、IP の評判、端末のフィンガープリント。** resultlog が持っていないデータが必要です。
 - **実際のプロジェクトでは未確認:** ラベルの変換、アラート、本番の Identity Platform（ブロッキング関数は Auth エミュレータでのみ確認しました）。
 
-
 ## Cloud Monitoring
 
 resultlog のエントリは、Cloud Logging と Cloud Monitoring で読み、アラートを掛けられるように作ってあります。下のレシピでコンソールから手作業で設定することも、`resultlog monitoring` で設定一式をファイルとして書き出すこともできます。
@@ -663,9 +1955,23 @@ resource.type="cloud_run_revision" AND jsonPayload.errorName="DeadlineExceeded"
 
 # 途中で切れた・差し控えられた・中断された LLM の回答
 resource.type="cloud_run_revision" AND (jsonPayload.llm.truncated>0 OR jsonPayload.llm.blocked>0 OR jsonPayload.llm.interrupted>0)
+
+# Firebase Security Rules が作られた・デプロイされた・削除された
+logName:"cloudaudit.googleapis.com%2Factivity" AND protoPayload.serviceName="firebaserules.googleapis.com" AND protoPayload.methodName:("CreateRuleset" OR "CreateRelease" OR "UpdateRelease" OR "DeleteRelease" OR "DeleteRuleset")
+
+# IAM ポリシーが設定された: メンバーの追加、ロールの変更
+logName:"cloudaudit.googleapis.com%2Factivity" AND protoPayload.methodName:"SetIamPolicy"
+
+# サービスアカウントキーが作られた・アップロードされた
+logName:"cloudaudit.googleapis.com%2Factivity" AND protoPayload.serviceName="iam.googleapis.com" AND protoPayload.methodName=("google.iam.admin.v1.CreateServiceAccountKey" OR "google.iam.admin.v1.UploadServiceAccountKey")
+
+# Firebase プロジェクトの設定、または API キーが変更された
+logName:"cloudaudit.googleapis.com%2Factivity" AND protoPayload.serviceName=("firebase.googleapis.com" OR "apikeys.googleapis.com")
 ```
 
-特定の失敗が再発したときに通知を受けるには、最初のフィルタに `AND jsonPayload.fingerprint="…"` を足します。fingerprint は digest とエントリに載っています。どのフィルタも `AND resource.labels.service_name="getuser"` を足せば、1 つの関数に絞れます。
+最後の 4 つは関数についてのものではなく、Google がプロジェクト自体について書くエントリなので、`resource.type="cloud_run_revision"` は付きません。[プロジェクト自体への変更](#プロジェクト自体への変更)を参照してください。
+
+特定の失敗が再発したときに通知を受けるには、最初のフィルタに `AND jsonPayload.fingerprint="…"` を足します。fingerprint は digest とエントリに載っています。最初の 6 つは、どれも `AND resource.labels.service_name="getuser"` を足せば、1 つの関数に絞れます。
 
 **行に情報を足す。** Logs Explorer はエントリを 1 行とチップで表示します。**Preferences → Manage summary fields** で `jsonPayload.errorName`、`jsonPayload.durationMs`、`jsonPayload.authUid`、`jsonPayload.securityEvent` を追加し、**Apply** を押します。すると各行に、メッセージの横に失敗の種類、所要時間、呼び出した人、セキュリティイベントが表示されます。これは表示の設定で、ログに出力される内容は変わりません。
 
@@ -683,15 +1989,33 @@ npx resultlog monitoring --project my-project \
 ### 作られるもの
 
 - **ログベース指標 9 個**（すべてカウンタ）: 失敗（エラー名、エラーコード、重大度別）、セキュリティイベントと監査イベント（種類別）、タイムアウト、コールドスタート、重複イベント、途中で切れた・差し控えられた・中断された LLM の回答。ラベルが取る値は意図的に少なくしています。ユーザー ID やアドレスをラベルにすると、値ごとに時系列が増えて課金されます。
-- **アラートポリシー 6 個**。それぞれ、何を意味するか、どうするか、digest でどう詳しく調べるかをドキュメントに書いています。
+- **アラートポリシー 10 個**。それぞれ、何を意味するか、どうするかをドキュメントに書いています。最初の 6 つには、詳しく調べる digest のコマンドも付きます。
   - **サーバーエラー**: 1 つの関数で 5 分間に 5 回を超えた場合（ERROR 以上。not-found のような想定内の失敗は数えません）
   - **セキュリティイベントの急増**: 同じ種類が 5 分間に 20 回を超えた場合
   - **App Check トークンの再利用**と**権限やアカウントの変更**: ログベースのアラートで、エントリ自体に反応して通知します（5 分間に最大 1 回）。稀なイベントなので、期間の件数で数えると埋もれてしまうためです。
   - **関数のタイムアウト**: 10 分間に 3 回を超えた場合
   - **LLM の回答が切れた・差し控えられた・中断された**: いずれかが 10 分間に 5 回を超えた場合
+  - **プロジェクト自体についての、ログベースのアラート 4 つ**: Firebase Security Rules の変更、IAM ポリシーの変更、サービスアカウントキーの作成、Firebase プロジェクトや API キーの変更。[プロジェクト自体への変更](#プロジェクト自体への変更)を参照してください。
 - **ダッシュボード**「resultlog: functions」: Cloud Run 自身のリクエスト数とレイテンシ（p50、p95）、続いて resultlog の指標（失敗、セキュリティイベント、監査イベント、タイムアウト・重複・コールドスタート、LLM の問題）、そしてエントリを一覧するパネルが 2 つ（セキュリティと監査のエントリ、失敗）。
 
 オプション: `--service checkout,on-order` はその関数だけを対象にします（Cloud Run のサービス名で指定します。関数名を小文字にしたものです）。`--threshold errors=10` はアラートのしきい値を変えます（`errors`、`security-events`、`timeouts`、`llm-problems`）。`--prefix` は名前の接頭辞、`--out` は出力先（既定 `./monitoring`）です。出力先に生成される `README.md` に、各ファイルの説明があります。
+
+### プロジェクト自体への変更
+
+Google Cloud は、誰かがプロジェクトを変更するたびに、管理アクティビティ監査ログのエントリを書きます。Security Rules をデプロイした、IAM ポリシーを設定した、サービスアカウントキーを作った、Firebase のアプリを追加した、API キーを編集した、といった操作です。このエントリは**常に書かれ、設定・除外・無効化ができず**、無料です。つまり記録のために、あなたがすることも、関数に足すものもありません。ひとりでに起きないのは通知です。アラートがない限り、Cloud Logging は誰にも知らせません。`resultlog monitoring` は、そのためのログベースのアラートを 4 つ書き出します（コンソールのレシピと同じフィルタなので、手作業でも作れます）。
+
+| アラート | 反応するもの | なぜ大事か |
+|---|---|---|
+| Firebase Security Rules の変更 | `firebaserules.googleapis.com` の `CreateRuleset`、`CreateRelease`、`UpdateRelease`、`DeleteRelease`、`DeleteRuleset` | ルールは、データとそれ以外の全員の間に立つものです。ルールが開いていると、データが漏れます |
+| IAM ポリシーの変更 | すべての `SetIamPolicy`: プロジェクト、サービスアカウント（`google.iam.admin.v1.SetIAMPolicy`）、公開された関数、その他のリソース | 誰が何をできるか、誰になりすませるか |
+| サービスアカウントキーの作成 | `iam.googleapis.com` の `CreateServiceAccountKey` と `UploadServiceAccountKey` | キーは、期限のない、ファイルになったパスワードです |
+| Firebase プロジェクトや API キーの変更 | `firebase.googleapis.com`（アプリ、SHA 証明書、プロジェクト）と `apikeys.googleapis.com`（API キーは Firebase ではなく API Keys API のものです）が書くすべて | 見覚えのないアプリや、制限を外したキーは、バックエンドを呼べる相手を広げます |
+
+- どれも、通知は 5 分間に最大 1 回です。ドキュメントには、誰が・どこからやったかを表示する `gcloud logging read` コマンド（`protoPayload.authenticationInfo.principalEmail`、`protoPayload.requestMetadata.callerIp`）が書かれています。
+- **自分たちの作業でも反応します。** ルールのデプロイは、ルールの変更です。こうしたアラートはそれが目的で、あなたは自分だったかを確かめます。ルールを 1 日に何度もデプロイするチームで、他の人の操作にだけ反応させたいなら、プリンシパルでフィルタを絞ってください（`AND NOT protoPayload.authenticationInfo.principalEmail:"ci@"` など）。
+- `:` は大文字小文字を区別せず、値の一部に一致します。`SetIamPolicy` がサービスアカウントの `google.iam.admin.v1.SetIAMPolicy` にも当たるのはそのためです。完全一致の `="SetIamPolicy"` では、プロジェクトの分しか見えません。
+- 見えるのは**変更**で、読み取りではありません。キーの値やプロジェクトの設定を読む操作はデータアクセス監査ログで、既定では無効で、量も大きくなりえます。
+- `--service` と `--prefix` は関数のアラートに効きます。この 4 つはプロジェクト全体を見ます。必要なものだけを適用してください。アラートは `alerts/` の下に 1 つずつのファイルです。
 
 ### 適用
 
@@ -713,8 +2037,7 @@ gcloud monitoring dashboards create --config-from-file dashboard.json
 - **ユーザー別・アドレス別は指標に入っていません。** それは digest で調べてください。
 - **費用。** ユーザー定義のログベース指標は Cloud Monitoring の料金で課金され、ラベルの値ごとに時系列が増えます。生成されるラベルはイベント名、エラー名、重大度です。ID を持つラベルは追加しないでください。
 - **第 2 世代の関数のみ対象です。** フィルタは `resource.type="cloud_run_revision"` を選びます。
-- **実際のプロジェクトには適用していません。** ファイルは Google の API リファレンスに従っていて、フィルタはライブラリが実際に書き出すエントリに対してテストしていますが、実プロジェクトに適用した人はまだいません。まず `dashboards create --validate-only` で検証し、最初の実行の出力を確認してください。フィールドの調整が 1、2 か所必要になるかもしれません。
-
+- **最初の実行を確認してください。** ファイルは Google の API リファレンスに従っていて、フィルタは、ライブラリが実際に書き出すエントリと、Google が文書化している管理アクティビティのエントリに対してテストしています。まず `dashboards create --validate-only` で検証し、最初の実行の出力を確認してください。Google の API がフィールドの調整を求めたら、ファイルは普通の JSON なので直せます。
 
 ## AI アシスタントと調べる
 
@@ -785,7 +2108,7 @@ Cloud Logging は、毎月プロジェクトあたり最初の 50 GiB を超え�
 
 ## 制限事項
 
-- 記録されるのは、ラップしたハンドラ内の処理だけです。
+- 記録されるのは、ラップしたハンドラ内の処理だけです。プロジェクト自体への変更（Security Rules、IAM、キー）は管理アクティビティ監査ログにあり、[`resultlog monitoring`](#プロジェクト自体への変更)が見張ります。
 - `wrapEvent` がエラーを再 throw すると、Functions のランタイム側でも同じエラーがログに出ることがあり、Error Reporting で 2 回数えられる場合があります。
 - タイムアウトのガードは、遅い実行に代わって応答しますが、その処理自体は止められません。中断できる呼び出しには `logContext.signal` を渡してください。
 - スタックトレースが残るのは、返したり throw したりしたものが `Error` の場合だけです。文字列ではなく `AppError` のサブクラスを返してください。

@@ -1,6 +1,14 @@
 # resultlog
 
+[![CI](https://github.com/ikenokazuki/resultlog/actions/workflows/ci.yml/badge.svg)](https://github.com/ikenokazuki/resultlog/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/resultlog)](https://www.npmjs.com/package/resultlog)
+[![license](https://img.shields.io/npm/l/resultlog)](LICENSE)
+
+Encode every Firebase Function invocation as one record.
+
 [日本語](README.ja.md)
+
+## Description
 
 Return a [neverthrow](https://github.com/supermacro/neverthrow) `Result` from your Firebase Functions (v2) handlers and get, for every invocation:
 
@@ -18,9 +26,10 @@ Return a [neverthrow](https://github.com/supermacro/neverthrow) `Result` from yo
 - **a summary of outgoing HTTP calls** per host (count, status, time), and a `coldStart` flag,
 - **LLM call accounting**: tokens, model, finish reason and time to the first chunk, read from the response of any SDK, with no provider tables, and a cost from your own price function,
 - **tools for working with AI**: a `fingerprint` that names each kind of failure, `resultlog digest` to turn a day of logs into a report small enough to hand to an AI assistant, test helpers that let a test assert on what a handler logged, and an `llms.txt` for AI coding assistants,
-- **a small client helper** that turns a failed call into messages per form field.
-- **detection of unauthorized access**: security events named after the OWASP Logging Vocabulary (declared on errors, or recorded with `logContext.security`), App Check state and replay detection, sign-in events from Identity Platform blocking functions, an optional `actor` on every entry, and detection rules in the digest.
-- **Cloud Monitoring setup**: log-based metrics, alert policies and a dashboard generated for what resultlog writes, with a script that applies them (`resultlog monitoring`).
+- **a small client helper** that turns a failed call into messages per form field,
+- **detection of unauthorized access**: security events named after the OWASP Logging Vocabulary (declared on errors, or recorded with `logContext.security`), App Check state and replay detection, sign-in events from Identity Platform blocking functions, an optional `actor` on every entry, and detection rules in the digest,
+- **alerts for changes made to the project itself**: Firebase Security Rules, IAM policies, service account keys, and Firebase or API key settings, from the Admin Activity audit log that Google always writes,
+- **Cloud Monitoring setup**: log-based metrics, alert policies and a dashboard generated for what resultlog writes, as files for `gcloud` (`resultlog monitoring`).
 
 ## Why
 
@@ -32,15 +41,102 @@ Projects that combine Firebase Functions with a Result type tend to rebuild the 
 4. **Investigations.** After a suspected breach, you need to know who did what, from where, and whether it worked. Ordinary logs rarely record that consistently.
 5. **Every API fails differently.** Stripe, AI providers, gRPC and fetch each report failures in their own shape, so retry and alert rules end up scattered.
 
-## Install
+## Table of contents
 
-resultlog is not on npm yet. Until it is published, build a tarball from this repository and install it in your functions project:
+- [Description](#description)
+- [Why](#why)
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [Top-Level API](#top-level-api)
+- [API Documentation](#api-documentation)
+  - [Handler adapters](#handler-adapters)
+    - [`wrapCall` (function)](#wrapcall-function)
+    - [`wrapRequest` (function)](#wraprequest-function)
+    - [`wrapEvent` (function)](#wrapevent-function)
+    - [`wrapBlocking` (function)](#wrapblocking-function)
+  - [Errors](#errors)
+    - [`defineError` (function)](#defineerror-function)
+    - [`AppError` (class)](#apperror-class)
+    - [`InvalidInput` (class)](#invalidinput-class)
+    - [`DeadlineExceeded` (class)](#deadlineexceeded-class)
+  - [Calling other services](#calling-other-services)
+    - [`toExternalError` (function)](#toexternalerror-function)
+    - [`ExternalError` (class)](#externalerror-class)
+    - [`retry` (function)](#retry-function)
+    - [`fallback` (function)](#fallback-function)
+  - [Logging inside a handler](#logging-inside-a-handler)
+    - [`logContext.set` (method)](#logcontextset-method)
+    - [`logContext.debug` (method)](#logcontextdebug-method)
+    - [`logContext.error` (method)](#logcontexterror-method)
+    - [`logContext.audit` (method)](#logcontextaudit-method)
+    - [`logContext.security` (method)](#logcontextsecurity-method)
+    - [`logContext.setActor` (method)](#logcontextsetactor-method)
+    - [`logContext.llm` (method)](#logcontextllm-method)
+    - [`logContext.signal` (property)](#logcontextsignal-property)
+  - [Configuration](#configuration)
+    - [`configure` (function)](#configure-function)
+  - [Idempotency](#idempotency)
+    - [`firestoreIdempotency` (function)](#firestoreidempotency-function)
+  - [Utilities](#utilities)
+    - [`fingerprint` (function)](#fingerprint-function)
+  - [Testing](#testing)
+    - [`captureLogs` (function)](#capturelogs-function)
+    - [`callableRequest` (function)](#callablerequest-function)
+    - [`httpExchange` (function)](#httpexchange-function)
+    - [`cloudEvent` (function)](#cloudevent-function)
+    - [`authBlockingEvent` (function)](#authblockingevent-function)
+  - [In the app](#in-the-app)
+    - [`parseError` (function)](#parseerror-function)
+    - [`parseErrorBody` (function)](#parseerrorbody-function)
+  - [Digest](#digest)
+    - [`parseLogs` (function)](#parselogs-function)
+    - [`digest` (function)](#digest-function)
+  - [Cloud Monitoring files](#cloud-monitoring-files)
+    - [`monitoring` (function)](#monitoring-function)
+    - [`files` (function)](#files-function)
+  - [Command line](#command-line)
+    - [`resultlog digest` (command)](#resultlog-digest-command)
+    - [`resultlog monitoring` (command)](#resultlog-monitoring-command)
+- [Timeouts](#timeouts)
+- [What gets logged](#what-gets-logged)
+  - [Made to be read in Cloud Logging](#made-to-be-read-in-cloud-logging)
+- [External APIs](#external-apis)
+- [Duplicate events](#duplicate-events)
+- [Retries](#retries)
+  - [Retries never stack](#retries-never-stack)
+- [Outgoing calls](#outgoing-calls)
+- [LLM calls](#llm-calls)
+- [Security audit and investigation](#security-audit-and-investigation)
+  - [Keep your audit trail with the Admin Activity audit logs](#keep-your-audit-trail-with-the-admin-activity-audit-logs)
+- [Detecting unauthorized access](#detecting-unauthorized-access)
+  - [What your functions can and cannot see](#what-your-functions-can-and-cannot-see)
+  - [What gets recorded](#what-gets-recorded)
+  - [Who made the call](#who-made-the-call)
+  - [Sign-ins: wrapBlocking](#sign-ins-wrapblocking)
+  - [Alerts](#alerts)
+  - [When something is found](#when-something-is-found)
+  - [What resultlog does not do](#what-resultlog-does-not-do)
+- [Cloud Monitoring](#cloud-monitoring)
+  - [By hand, in the console](#by-hand-in-the-console)
+  - [Or have the files written for you](#or-have-the-files-written-for-you)
+  - [What you get](#what-you-get)
+  - [Changes made to the project itself](#changes-made-to-the-project-itself)
+  - [Applying it](#applying-it)
+  - [Things to know](#things-to-know)
+- [Investigating with an AI assistant](#investigating-with-an-ai-assistant)
+- [Log cost](#log-cost)
+- [Redaction](#redaction)
+- [Limitations](#limitations)
+- [Development](#development)
+- [License](#license)
 
-```bash
-bun install
-npm pack                              # builds dist/ and writes resultlog-0.1.0.tgz
-npm install ./resultlog-0.1.0.tgz     # in your functions project
+## Installation
+
+```sh
+npm install resultlog neverthrow
 ```
+
+`neverthrow`, `firebase-functions` and `firebase-admin` are peer dependencies; a Functions project already has the last two, and npm installs the ones that are missing. `zod` is optional (see below).
 
 It ships as ESM and CommonJS with type declarations, and works with `module: nodenext` (the Firebase default), `bundler` and the older `node` resolution.
 
@@ -83,9 +179,51 @@ export const getUser = onCall(
 );
 ```
 
-## Handler adapters
+That is the whole setup. For this function:
 
-Wrap the handler, then pass it to the trigger as usual. The handler may return a `Result`, a `ResultAsync` or a `Promise<Result>`.
+- A request that finds the user returns the value and writes one entry: `{ "severity": "INFO", "message": "getuser ok 42 ms", "authUid": "u1", "plan": "pro", "httpRequest": { … } }`.
+- An unknown id is a WARNING (`not-found`) and sends no alert. The client is told "User not found." and `details.reason: "UserNotFound"`.
+- A Firestore failure is an ERROR with its stack and cause, reported to Error Reporting. The client sees only `INTERNAL`.
+- An invalid `id` is rejected before the handler runs, and the client gets zod's issues to show per field.
+
+See [What gets logged](#what-gets-logged) for the entries themselves, and the [API Documentation](#api-documentation) for everything else.
+
+## Top-Level API
+
+resultlog exposes the following. The first group is `resultlog` itself, for the server; the others are separate entry points.
+
+**`resultlog`**
+
+- [`wrapCall`](#wrapcall-function), [`wrapRequest`](#wraprequest-function), [`wrapEvent`](#wrapevent-function) and [`wrapBlocking`](#wrapblocking-function) turn a handler that returns a `Result` into one a Firebase trigger accepts, and write the invocation's one log entry
+- [`defineError`](#defineerror-function) and [`AppError`](#apperror-class) make errors that keep their stack and know how to be logged, shown to the client and retried; [`InvalidInput`](#invalidinput-class) and [`DeadlineExceeded`](#deadlineexceeded-class) are the two the library raises itself
+- [`toExternalError`](#toexternalerror-function) and [`ExternalError`](#externalerror-class) turn any upstream failure (Stripe, an AI provider, Firestore, fetch, axios) into one error model
+- [`retry`](#retry-function) and [`fallback`](#fallback-function) retry a call or try another provider, without stacking on retries that are already there
+- [`logContext`](#logging-inside-a-handler) adds to the invocation's entry: [`set`](#logcontextset-method), [`debug`](#logcontextdebug-method), [`error`](#logcontexterror-method), [`audit`](#logcontextaudit-method), [`security`](#logcontextsecurity-method), [`setActor`](#logcontextsetactor-method), [`llm`](#logcontextllm-method) and [`signal`](#logcontextsignal-property)
+- [`configure`](#configure-function) sets sampling, the timeout, redaction, the LLM price function, the actor policy and the sink
+- [`firestoreIdempotency`](#firestoreidempotency-function) keeps an event trigger from running twice for one event
+- [`fingerprint`](#fingerprint-function) names a kind of failure
+
+**`resultlog/testing`**: [`captureLogs`](#capturelogs-function), [`callableRequest`](#callablerequest-function), [`httpExchange`](#httpexchange-function), [`cloudEvent`](#cloudevent-function), [`authBlockingEvent`](#authblockingevent-function)
+
+**`resultlog/client`**: [`parseError`](#parseerror-function), [`parseErrorBody`](#parseerrorbody-function)
+
+**`resultlog/digest`**: [`digest`](#digest-function), [`parseLogs`](#parselogs-function)
+
+**`resultlog/monitoring`**: [`monitoring`](#monitoring-function), [`files`](#files-function)
+
+**Command line**: [`resultlog digest`](#resultlog-digest-command), [`resultlog monitoring`](#resultlog-monitoring-command)
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+## API Documentation
+
+Every example assumes the imports it needs are at the top of the file; the [Quick start](#quick-start) shows them in one place. `Outcome<T>` stands for what a handler may return: a `Result<T, AppError>`, a `ResultAsync<T, AppError>` or a `Promise<Result<T, AppError>>`.
+
+### Handler adapters
+
+Wrap the handler, then pass it to the trigger as usual. Each adapter runs the handler inside the invocation's context, applies the [timeout guard](#timeouts) when you configured one, and turns the final `Result` into one log entry and an answer for the caller.
 
 | Adapter | Use with | Starting attributes | Ok | Err (WARNING) | Err (ERROR / CRITICAL) |
 |---|---|---|---|---|---|
@@ -94,21 +232,1267 @@ Wrap the handler, then pass it to the trigger as usual. The handler may return a
 | `wrapEvent(fn, options?)` | Pub/Sub, Firestore, Scheduler, … | `eventId`, `eventType` | — | logged and acknowledged, unless the error is `retryable` | logged and rethrown (retried when retries are enabled), unless `retryable: false` |
 | `wrapBlocking(fn, options?)` | `beforeUserSignedIn`, `beforeUserCreated` | `eventId`, `eventType` | returned to Firebase (custom claims, …); an audit event `authn_login_success` (`user_created` for a sign-up) | throws `HttpsError`; the security event `authn_login_fail` | same, unless `failOpen: true` lets the sign-in through |
 
-- **Schemas.** With a zod schema, `request.data` (or `req.body`) is parsed with `safeParseAsync` before `fn` runs, and its type comes from the schema. Invalid input becomes an `InvalidInput` error (`invalid-argument`, WARNING) and `fn` is not called. zod's `issues` go to the log and to the client as `details.issues`, so a form can show errors per field. Without a schema, `request.data` is `unknown`.
-- **Optional fields.** Firebase client SDKs send `undefined` properties as `null`, so declare optional fields with `.nullish()`, not `.optional()`.
-- **Streaming.** `wrapCall` passes `onCall`'s streaming `response` to the handler as its second argument: `(request, response) => { response?.sendChunk(part); … }`.
-- **Thrown exceptions** are logged as ERROR with code `internal`, keeping the original stack. A thrown `HttpsError` keeps its code and details, so existing handlers can be wrapped without changing what clients receive.
-- **`wrapRequest`** sends nothing more if the handler already responded (`res.headersSent`).
-- **`wrapEvent`** can't infer the event type through the generic trigger functions. Annotate it, or pass the trigger's type argument:
+**Handler options.** Every adapter takes them as its last argument:
 
-  ```ts
-  onMessagePublished("orders", wrapEvent((event: CloudEvent<MessagePublishedData>) => handle(event)));
-  onMessagePublished<Order>("orders", wrapEvent((event) => handle(event.data.message.json)));
-  ```
+```ts
+interface HandlerOptions {
+  /** Cut the invocation off this long after it started, minus the margin. Without it (and without configure({ timeoutSeconds })) there is no guard. */
+  timeoutSeconds?: number;
+  /** How long before the timeout the guard steps in. Default 1000. */
+  timeoutMarginMs?: number;
+}
+```
 
-  Event payloads are not validated for you; parse them with zod inside the handler.
+**Thrown exceptions** are logged as ERROR with code `internal`, keeping the original stack. A thrown `HttpsError` keeps its code and details, so an existing handler can be wrapped without changing what its clients receive.
 
-- **`maxEventAgeMs`.** `wrapEvent(fn, { maxEventAgeMs: 60 * 60 * 1000 })` acknowledges events whose CloudEvent `time` is older than the limit, without running `fn`, and logs them as an `EventTooOld` WARNING. With retries enabled, Cloud Functions (2nd gen) keeps retrying a failing event for up to 24 hours; this ends it sooner.
+#### `wrapCall` (function)
+
+For `onCall`. An `Ok` value goes back to the client. An `Err` becomes an `HttpsError` with the error's `code` and `publicMessage`, and, for WARNING errors, `details` that carry `reason` (the error's name) so the app can tell apart errors that share a code. With a zod schema, `request.data` is parsed with `safeParseAsync` before `fn` runs, and its type comes from the schema.
+
+**Signature:**
+
+```ts
+function wrapCall<T>(
+  fn: (request: CallableRequest<unknown>, response?: CallableResponse) => Outcome<T>,
+  options?: HandlerOptions,
+): (request: CallableRequest, response?: CallableResponse) => Promise<T>;
+
+function wrapCall<S extends ZodType, T>(
+  schema: S,
+  fn: (request: CallableRequest<output<S>>, response?: CallableResponse) => Outcome<T>,
+  options?: HandlerOptions,
+): (request: CallableRequest<input<S>>, response?: CallableResponse) => Promise<T>;
+```
+
+**Example:**
+
+```ts
+import { onCall } from "firebase-functions/v2/https";
+import { err, ok } from "neverthrow";
+import { z } from "zod";
+import { defineError, wrapCall } from "resultlog";
+
+class SoldOut extends defineError("SoldOut", { code: "failed-precondition", publicMessage: "Sold out." }) {}
+
+export const reserve = onCall(
+  wrapCall(z.object({ sku: z.string(), quantity: z.number().int().positive() }), (request) =>
+    request.data.quantity > 5 //     ^ typed from the schema
+      ? err(new SoldOut(`only 5 of ${request.data.sku} left`))
+      : ok({ reserved: request.data.quantity }),
+  ),
+);
+```
+
+- Invalid input becomes an [`InvalidInput`](#invalidinput-class) error (`invalid-argument`, WARNING) and `fn` is not called. zod's `issues` go to the log and to the client as `details.issues`, so a form can show a message per field ([`parseError`](#parseerror-function) turns them into `fieldErrors`). Without a schema, `request.data` is `unknown`.
+- Firebase client SDKs send `undefined` properties as `null`, so declare optional fields with `.nullish()`, not `.optional()`.
+- `response` is `onCall`'s streaming response: `(request, response) => { response?.sendChunk(part); … }`.
+- The entry starts with `authUid`, the caller's `actor` (see [Who made the call](#who-made-the-call)) and an `httpRequest` with the status the client receives.
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+#### `wrapRequest` (function)
+
+For `onRequest`. An `Ok` value is sent as `200` JSON. An `Err` is sent with the HTTP status of its code and a body shaped like a callable's error: `{ error: { status, message, details } }`. With a schema, `req.body` is parsed and typed. If the handler has already answered (`res.headersSent`), nothing more is sent, and the entry records the status it sent.
+
+**Signature:**
+
+```ts
+function wrapRequest<T>(
+  fn: (req: Request, res: Response) => Outcome<T>,
+  options?: HandlerOptions,
+): (req: Request, res: Response) => Promise<void>;
+
+function wrapRequest<S extends ZodType, T>(
+  schema: S,
+  fn: (req: Request & { body: output<S> }, res: Response) => Outcome<T>,
+  options?: HandlerOptions,
+): (req: Request, res: Response) => Promise<void>;
+```
+
+**Example:**
+
+```ts
+import { onRequest } from "firebase-functions/v2/https";
+import { z } from "zod";
+import { wrapRequest } from "resultlog";
+
+export const webhook = onRequest(
+  wrapRequest(z.object({ id: z.string() }), (req) => processWebhook(req.body.id)),
+);
+```
+
+- The client address, `X-Forwarded-For` and user agent are recorded as the `actor`. Add a uid you verified yourself with [`logContext.setActor`](#logcontextsetactor-method).
+- The entry's `httpRequest` has the method, the path (never the query string, which can hold secrets), the status and the latency.
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+#### `wrapEvent` (function)
+
+For event triggers: Pub/Sub, Firestore, Scheduler, Storage and the rest. A failure that is `retryable` is rethrown, so the platform retries the event (when retries are enabled); any other failure is logged and acknowledged. A `retryable` failure is a server-side one by default (see [`AppError`](#apperror-class)).
+
+**Signature:**
+
+```ts
+function wrapEvent<E>(
+  fn: (event: E) => Outcome<unknown>,
+  options?: EventOptions,
+): (event: E) => Promise<void>;
+
+interface EventOptions extends HandlerOptions {
+  /** Acknowledge (log as WARNING, skip `fn`) events whose CloudEvent `time` is older than this. */
+  maxEventAgeMs?: number;
+  /** Skip events that were processed already. See `firestoreIdempotency`. */
+  idempotency?: IdempotencyStore;
+  /** How long a claim blocks redeliveries. Default: the timeout plus 60 s (540 s without a configured timeout). */
+  leaseMs?: number;
+}
+```
+
+**Example:**
+
+```ts
+import type { CloudEvent } from "firebase-functions/v2";
+import { type MessagePublishedData, onMessagePublished } from "firebase-functions/v2/pubsub";
+import { wrapEvent } from "resultlog";
+
+export const onOrder = onMessagePublished(
+  "orders",
+  wrapEvent((event: CloudEvent<MessagePublishedData>) => handleOrder(event.data.message.json), {
+    maxEventAgeMs: 60 * 60 * 1000,
+  }),
+);
+```
+
+- The event type is not inferred through the generic trigger functions. Annotate it as above, or pass the trigger's type argument: `onMessagePublished<Order>("orders", wrapEvent((event) => …))`. Event payloads are not validated for you; parse them with zod inside the handler.
+- `maxEventAgeMs` ends a retry storm: with retries enabled, Cloud Functions (2nd gen) keeps retrying a failing event for up to 24 hours. An event older than the limit is acknowledged without running `fn` and logged as an `EventTooOld` WARNING.
+- `idempotency` makes the handler run once per event; see [`firestoreIdempotency`](#firestoreidempotency-function).
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+#### `wrapBlocking` (function)
+
+For the Identity Platform blocking triggers `beforeUserSignedIn` and `beforeUserCreated`. Every sign-in that gets through is recorded as the audit event `authn_login_success` (a sign-up as `user_created`), with the address, the user agent and the sign-in method. Returning an `AppError` denies the sign-in: Firebase gets an `HttpsError`, and the log gets the security event `authn_login_fail` (or the `securityEvent` the error names). What `fn` returns on success goes back to Firebase: custom claims, `disabled`, and so on.
+
+**Signature:**
+
+```ts
+function wrapBlocking<R = void>(
+  fn: (event: AuthBlockingEvent) => Outcome<R>,
+  options?: BlockingOptions,
+): (event: AuthBlockingEvent) => Promise<R | undefined>;
+
+interface BlockingOptions extends HandlerOptions {
+  /** What to do when the policy itself breaks (an exception, a timeout). false, the default, denies the sign-in; true lets it through and logs the failure. A denial the policy returns on purpose is always honoured. */
+  failOpen?: boolean;
+}
+```
+
+**Example:**
+
+```ts
+import { beforeUserSignedIn } from "firebase-functions/v2/identity";
+import { err, ok } from "neverthrow";
+import { defineError, wrapBlocking } from "resultlog";
+
+class BlockedAddress extends defineError("BlockedAddress", { code: "permission-denied", publicMessage: "Sign-in is not available." }) {}
+
+export const onSignIn = beforeUserSignedIn(
+  wrapBlocking((event) => (isDenied(event.ipAddress) ? err(new BlockedAddress("on the deny list")) : ok({ sessionClaims: { plan: "free" } }))),
+);
+```
+
+- It needs the project to be upgraded to Firebase Authentication with Identity Platform. Firebase gives a blocking function 7 seconds, so the timeout guard defaults to 7 here whatever the global timeout is.
+- It runs after the credentials were verified, so a wrong password never gets here: see [what your functions can and cannot see](#what-your-functions-can-and-cannot-see). In the Auth emulator the address and user agent are placeholders.
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+### Errors
+
+An error that crosses the library is an `AppError`: it has a Firebase `code`, a message for the client, a severity that decides where it is reported, and whether a failed event should be retried. Define the ones you use as named classes. Return them (`err(new UserNotFound(…))`) instead of throwing them.
+
+#### `defineError` (function)
+
+Returns a subclass of `AppError` with defaults. Extend it with a named class, so that editor hovers and type errors say `UserNotFound` instead of an anonymous class.
+
+**Signature:**
+
+```ts
+function defineError<N extends string>(
+  name: N,
+  defaults: Omit<AppErrorOptions, "context" | "cause">,
+): new (message: string, options?: { context?: Record<string, unknown>; details?: Record<string, unknown>; cause?: unknown }) => AppError & { name: N };
+```
+
+**Example:**
+
+```ts
+import { AppError, defineError } from "resultlog";
+
+class UserNotFound extends defineError("UserNotFound", { code: "not-found", publicMessage: "User not found." }) {}
+
+const e = new UserNotFound("users/u9 does not exist", { cause, context: { id: "u9" } });
+e instanceof UserNotFound; // true
+e instanceof AppError;     // true
+e.name;                    // "UserNotFound" (a literal type, so unions of errors can be narrowed by name)
+```
+
+- `message` is internal: it goes to the logs only.
+- `publicMessage` is the client's message. It defaults to the canonical status name, such as `"NOT_FOUND"`, so an internal message never reaches the client by accident.
+- For WARNING errors the client also gets `details`: `{ reason: "UserNotFound", …your details }`. `reason` lets the app tell apart errors that share a code (two kinds of `already-exists`, for example) and pick its own translated text. `details` is public, so never put secrets in it. ERROR and CRITICAL errors give the client nothing beyond `publicMessage`.
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+#### `AppError` (class)
+
+The base class. Use it directly for a one-off error; use [`defineError`](#defineerror-function) for the ones you meet again.
+
+**Signature:**
+
+```ts
+class AppError extends Error {
+  constructor(message: string, options: AppErrorOptions);
+  readonly code: ErrorCode;           // a Firebase code such as "not-found"; never "ok"
+  readonly severity: Severity;        // "WARNING" | "ERROR" | "CRITICAL"
+  readonly retryable: boolean;
+  readonly publicMessage: string;
+  readonly context: Record<string, unknown>;
+  readonly details?: Record<string, unknown>;
+  readonly securityEvent?: string | false;
+  withContext(extra: Record<string, unknown>): this; // adds fields to `context`, and returns the same error
+}
+
+interface AppErrorOptions {
+  code: ErrorCode;
+  publicMessage?: string;
+  severity?: Severity;
+  retryable?: boolean;
+  securityEvent?: string | false;
+  context?: Record<string, unknown>;
+  details?: Record<string, unknown>;
+  cause?: unknown;
+}
+```
+
+**Example:**
+
+```ts
+import { AppError } from "resultlog";
+
+const e = new AppError("the ledger is out of balance", {
+  code: "data-loss",
+  context: { ledger: "L-7" }, // goes to the log, never to the client
+  cause: original,            // keeps the stack of what went wrong underneath
+});
+e.severity;      // "ERROR"
+e.retryable;     // true
+e.publicMessage; // "DATA_LOSS"
+```
+
+- `severity` defaults to `"ERROR"` when the code maps to an HTTP 5xx status (`internal`, `unknown`, `data-loss`, `unimplemented`, `unavailable`, `deadline-exceeded`) and to `"WARNING"` otherwise. ERROR and CRITICAL go to Error Reporting; WARNING doesn't.
+- `retryable` decides whether [`wrapEvent`](#wrapevent-function) rethrows a failed event so that it is retried. It defaults to `severity !== "WARNING"`. Set it when the two differ: a rate limit isn't worth an alert but is worth a retry, and a bug in your code is worth an alert but retrying won't fix it.
+- `securityEvent` records the failure as a security event whatever the client is told, with the actor: an [OWASP Logging Vocabulary](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Vocabulary_Cheat_Sheet.html) name such as `authz_fail`. It lets you answer a request for someone else's order with `not-found`, which doesn't reveal that the order exists, and still see the attempt. Without it, `permission-denied` and `unauthenticated` count as `authz_fail`; `securityEvent: false` turns that off.
+- `context` is merged into the log entry's top level. `error.withContext({ orderId })` adds to it while an error bubbles up through your layers. Errors you throw keep their stack; the stack of the `cause` is logged too.
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+#### `InvalidInput` (class)
+
+Raised by the adapters when a zod schema rejects the input: `invalid-argument`, WARNING, and the security event `input_validation_fail` (so that the digest can see someone fuzzing an endpoint). Its `details.issues` are zod's issues, which the app turns into a message per form field with [`parseError`](#parseerror-function). Construct it yourself for a check you do by hand.
+
+**Signature:**
+
+```ts
+class InvalidInput extends AppError {} // code: "invalid-argument", securityEvent: "input_validation_fail"
+```
+
+**Example:**
+
+```ts
+import { err, ok } from "neverthrow";
+import { InvalidInput } from "resultlog";
+
+// a check a schema can't express
+const checkRange = (from: Date, to: Date) =>
+  to > from
+    ? ok({ from, to })
+    : err(new InvalidInput("the end is before the start", { details: { issues: [{ path: ["to"], message: "Must be after the start" }] } }));
+```
+
+In a test, what the app would receive:
+
+```ts
+await expect(reserve(callableRequest({ sku: 1 }, { uid: "u1" }))).rejects.toMatchObject({
+  code: "invalid-argument",
+  details: { reason: "InvalidInput", issues: [{ path: ["sku"] }] },
+});
+```
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+#### `DeadlineExceeded` (class)
+
+The error the [timeout guard](#timeouts) ends an invocation with, a little before the platform would kill it. `deadline-exceeded`, ERROR, retryable. The entry that carries it has everything gathered up to that moment.
+
+**Signature:**
+
+```ts
+class DeadlineExceeded extends AppError {} // code: "deadline-exceeded", severity: "ERROR"
+```
+
+**Example:**
+
+```ts
+import { configure, logContext } from "resultlog";
+
+configure({ timeoutSeconds: 60 }); // the same number you gave setGlobalOptions
+
+// Stop the calls that can be stopped when the guard fires:
+const res = await fetch(url, { signal: logContext.signal });
+```
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+### Calling other services
+
+#### `toExternalError` (function)
+
+Turns any upstream failure into an [`ExternalError`](#externalerror-class). It reads the shape of the error, so it needs no SDK: a timeout, a network failure, an HTTP status, a gRPC code. It adds a small `upstream` summary to the log (`status`, `code`, `type`, `requestId`, `retryAfterMs`) and keeps large error objects, such as axios's request, out of it. The table of what becomes what is in [External APIs](#external-apis).
+
+**Signature:**
+
+```ts
+function toExternalError<P extends string>(
+  provider: P,
+  error: unknown,
+  classify?: (error: unknown, upstream: Upstream) => ExternalClassification | undefined,
+): ExternalError<P>;
+
+type ExternalClassification = Partial<Pick<AppErrorOptions, "code" | "severity" | "retryable" | "publicMessage" | "details" | "context">>;
+```
+
+**Example:**
+
+```ts
+import { ResultAsync } from "neverthrow";
+import { toExternalError } from "resultlog";
+
+const createIntent = (params: Stripe.PaymentIntentCreateParams) =>
+  ResultAsync.fromPromise(stripe.paymentIntents.create(params), (e) =>
+    toExternalError("stripe", e, (_error, upstream) =>
+      upstream.type === "StripeCardError" ? { code: "failed-precondition", publicMessage: "Your card was declined." } : undefined,
+    ),
+  );
+```
+
+`classify` is for errors that mean something specific to one provider; whatever it returns overrides the defaults. For a `fetch` that resolved with a non-ok `Response`, pass the `Response` as is: `toExternalError("partner", res)`.
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+#### `ExternalError` (class)
+
+What `toExternalError` returns: an `AppError` that remembers who failed and how.
+
+**Signature:**
+
+```ts
+class ExternalError<P extends string = string> extends AppError {
+  readonly provider: P;
+  readonly upstream: Upstream;
+}
+
+interface Upstream {
+  status?: number;
+  code?: string | number;
+  type?: string;
+  requestId?: string;    // quote it to the provider's support
+  retryAfterMs?: number; // from Retry-After, when the provider sent one
+}
+```
+
+**Example:**
+
+```ts
+const result = await createIntent(params);
+if (result.isErr()) {
+  const { provider, upstream, retryable } = result.error;
+  // "stripe", { status: 429, requestId: "req_…", retryAfterMs: 2000 }, true
+}
+```
+
+The provider name is a type parameter, so `retry()` can refuse, at compile time, to wrap a call whose SDK already retries (see [Retries never stack](#retries-never-stack)).
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+#### `retry` (function)
+
+Runs a call again when it fails with a `retryable` error, and returns a `ResultAsync` like the call itself. It waits as long as `Retry-After` says when the provider sends one, and otherwise uses a jittered exponential backoff. Use it only for idempotent calls.
+
+**Signature:**
+
+```ts
+function retry<T, E extends AppError, const O extends RetryOptions = {}>(
+  fn: () => Outcome<T, E>, // its type also carries the compile-time guard: see "Retries never stack"
+  options?: O,
+): ResultAsync<T, E>;
+
+interface RetryOptions {
+  attempts?: number;                // in total, the first one included. Default 3
+  baseDelayMs?: number;             // upper bound of the first backoff; it doubles. Default 200
+  maxDelayMs?: number;              // longest single wait; a longer Retry-After stops retrying. Default 2000
+  budgetMs?: number;                // stop when the next wait would end this long after the first attempt started. Default 5000
+  sdkRetriesDisabled?: boolean;     // you set the SDK's own retries to 0
+  allowRepeatedRequests?: boolean;  // the call repeats the same request on purpose (polling)
+}
+```
+
+**Example:**
+
+```ts
+import { retry } from "resultlog";
+
+const getPartner = (url: string) => retry(() => fetchPartner(url), { attempts: 3, budgetMs: 3000 });
+```
+
+- It never stacks on another retry layer. For Stripe, OpenAI and Anthropic it is a type error unless you turned the SDK's retries off and pass `sdkRetriesDisabled: true`; for any other call it notices at run time that one attempt sent the same HTTP request twice, and stops. Read [Retries never stack](#retries-never-stack).
+- It knows the [timeout guard](#timeouts)'s deadline: it doesn't wait past it.
+- Each `retry()` that retried, or wanted to and stopped, is recorded in the entry as `retries`.
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+#### `fallback` (function)
+
+Tries the attempts in turn, and moves on only when the failure is `retryable`, meaning the provider is at fault: a request that is itself wrong would be refused by the next provider too. Each attempt it leaves is recorded under `handledErrors` with the attempt's index.
+
+**Signature:**
+
+```ts
+function fallback<const A extends readonly [() => Outcome<any>, ...(() => Outcome<any>)[]]>(
+  ...attempts: A
+): ResultAsync<OutcomeOk<A[number]>, OutcomeErr<A[number]>>;
+```
+
+**Example:**
+
+```ts
+import { fallback } from "resultlog";
+
+const answer = (prompt: string) =>
+  fallback(
+    () => askPrimary(prompt),   // each returns a ResultAsync<Answer, ExternalError>
+    () => askSecondary(prompt), // tried only if the first failed in a way worth another provider
+  );
+```
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+### Logging inside a handler
+
+Do not log inside a handler with `console.log` or `firebase-functions/logger`: add facts to the invocation's one entry with `logContext`. The context lives in `AsyncLocalStorage`, so concurrent invocations never mix. `set`, `debug`, `error` and `setActor` do nothing outside a wrapped handler; `audit` and `security` write even there.
+
+#### `logContext.set` (method)
+
+Adds fields to the invocation's single log entry. It pairs well with `andTee`.
+
+**Signature:**
+
+```ts
+logContext.set(attrs: Record<string, unknown>): void;
+```
+
+**Example:**
+
+```ts
+import { logContext } from "resultlog";
+
+findUser(id).andTee((user) => logContext.set({ plan: user.plan, region: user.region }));
+// → { "severity": "INFO", "message": "getuser ok 42 ms", "plan": "pro", "region": "eu", … }
+```
+
+Values go through [redaction](#redaction): a key such as `password` or `token`, and anything that looks like an API key, a JWT or a card number, is replaced. A field named like one resultlog writes itself (`errorName`, `durationMs`, …) is replaced by the library's: see [Limitations](#limitations).
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+#### `logContext.debug` (method)
+
+Keeps a breadcrumb in memory (the latest 50). Breadcrumbs are written, as `breadcrumbs`, **only if the invocation fails**: the detail you need when something breaks, without paying to log it when nothing does.
+
+**Signature:**
+
+```ts
+logContext.debug(message: string, data?: Record<string, unknown>): void;
+```
+
+**Example:**
+
+```ts
+logContext.debug("looking up user", { id });
+logContext.debug("cache miss", { key: `users/${id}` });
+// on a failure: "breadcrumbs": [{ "timestamp": "…", "level": "DEBUG", "message": "looking up user", "data": { "id": "u9" } }, …]
+```
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+#### `logContext.error` (method)
+
+Records an error you recovered from (a cache miss you fell back from, say) under `handledErrors`. The invocation still succeeds, and such a run is never sampled away. It pairs with `orElse`.
+
+**Signature:**
+
+```ts
+logContext.error(error: unknown, data?: Record<string, unknown>): void;
+```
+
+**Example:**
+
+```ts
+readFromCache(key).orElse((e) => {
+  logContext.error(e, { step: "cache" });
+  return readFromDb(key);
+});
+```
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+#### `logContext.audit` (method)
+
+Writes an audit entry (NOTICE) **right away**, with the actor and the label `audit`, so it survives a timeout or a crash later in the invocation. The invocation's final entry lists the same events under `auditEvents`, with the outcome. It also works outside a wrapped handler. Use [OWASP Logging Vocabulary](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Vocabulary_Cheat_Sheet.html) names where they fit: `authz_change`, `authz_admin`, `sensitive_read`, `sensitive_update`, `sensitive_delete`, `user_created`, `user_deleted`.
+
+**Signature:**
+
+```ts
+logContext.audit(event: string, data?: Record<string, unknown>): void;
+```
+
+**Example:**
+
+```ts
+logContext.audit("authz_change", { target: `users/${id}`, role: "admin" });
+```
+
+```json
+{
+  "severity": "NOTICE",
+  "message": "authz_change",
+  "auditEvent": "authz_change",
+  "target": "users/u9",
+  "role": "admin",
+  "actor": { "uid": "u1", "ip": "203.0.113.5", "userAgent": "Mozilla/5.0 …" },
+  "logging.googleapis.com/labels": { "audit": "true" }
+}
+```
+
+See [Security audit and investigation](#security-audit-and-investigation).
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+#### `logContext.security` (method)
+
+Records a security event at once, with the actor and the label `security`. Use it where nothing fails but something deserves a trail, such as `sensitive_read`. To answer a request with a harmless error and still record it, declare `securityEvent` on the error instead; record an event one way or the other, not both.
+
+**Signature:**
+
+```ts
+logContext.security(
+  event: string,
+  data?: Record<string, unknown>,
+  options?: { severity?: "NOTICE" | "WARNING" | "ERROR" | "CRITICAL" }, // default "WARNING"
+): void;
+```
+
+**Example:**
+
+```ts
+logContext.security("sensitive_read", { collection: "payments", count: rows.length });
+logContext.security("authn_token_reuse", { appId }, { severity: "CRITICAL" });
+```
+
+See [Detecting unauthorized access](#detecting-unauthorized-access).
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+#### `logContext.setActor` (method)
+
+Adds to the record of who made the request. `wrapCall` fills in the uid, the sign-in provider, App Check and the address by itself; in `onRequest` nothing is verified for you, so add the uid you checked.
+
+**Signature:**
+
+```ts
+logContext.setActor(fields: Record<string, unknown>): void;
+```
+
+**Example:**
+
+```ts
+const decoded = await getAuth().verifyIdToken(token);
+logContext.setActor({ uid: decoded.uid });
+```
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+#### `logContext.llm` (method)
+
+Records an LLM call: tokens, model and finish reason are read from the response of any SDK by what its keys say, with no table of providers. Given a stream, it returns the same chunks and also records the time to the first one and whether the stream was cut short. It returns what you gave it, so it fits inside a chain.
+
+**Signature:**
+
+```ts
+logContext.llm<T>(response: T, explicit?: LlmCall): T;
+logContext.llm<C>(stream: AsyncIterable<C>, explicit?: LlmCall): AsyncGenerator<C, void, undefined>;
+
+interface LlmCall {
+  model?: string;
+  finishReason?: string;
+  ttftMs?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+  cachedTokens?: number;
+  cacheWriteTokens?: number;
+  reasoningTokens?: number;
+}
+```
+
+**Example:**
+
+```ts
+const completion = await client.chat.completions.create({ model: "gpt-4o-mini", messages });
+logContext.llm(completion);
+
+for await (const chunk of logContext.llm(stream)) send(chunk);
+
+logContext.llm(response, { model: "my-alias", inputTokens: 1200 }); // what it can't read, you pass
+```
+
+How the numbers are read, what counts as cut off or withheld, and how to price a call: [LLM calls](#llm-calls).
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+#### `logContext.signal` (property)
+
+An `AbortSignal` that aborts when the [timeout guard](#timeouts) is about to cut the invocation off. The handler itself can't be cancelled, so pass the signal to the calls that can stop. Undefined outside a wrapped handler.
+
+**Signature:**
+
+```ts
+logContext.signal: AbortSignal | undefined;
+```
+
+**Example:**
+
+```ts
+const res = await fetch(url, { signal: logContext.signal });
+const completion = await client.messages.create(params, { signal: logContext.signal });
+```
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+### Configuration
+
+#### `configure` (function)
+
+Sets how the library behaves. Call it once at startup, before the first invocation. A later call changes only the options it names.
+
+**Signature:**
+
+```ts
+function configure(options: LogOptions): void;
+
+interface LogOptions {
+  /** Share of fast successes that are logged, 0 to 1. Default 1. Failures, slow runs, audits and other notable runs are always logged. */
+  successSampleRate?: number;
+  /** A success at least this slow (ms) is always logged. Default 1000. */
+  slowMs?: number;
+  /** Your functions' timeout in seconds. The platform doesn't expose it. Turns the timeout guard on. */
+  timeoutSeconds?: number;
+  /** How long before the timeout the guard steps in (ms). Default 1000. */
+  timeoutMarginMs?: number;
+  /** Summarize the invocation's outgoing HTTP calls per host. Default true. */
+  recordExternalCalls?: boolean;
+  /** Patterns to redact besides the built-in ones; matches become "[REDACTED:custom]". */
+  secretPatterns?: RegExp[];
+  /** Prices one LLM call, in any unit; the sum is `llm.cost`. Return undefined for a call you can't price. */
+  price?: (call: LlmCall) => number | undefined;
+  /** "security" (default): the actor on audit and security entries. "all": on every entry. */
+  actor?: "security" | "all";
+  /** Receives every entry instead of the platform logger. A sink that throws is ignored. */
+  sink?: (entry: LogEntry) => void;
+}
+```
+
+**Example:**
+
+```ts
+import { setGlobalOptions } from "firebase-functions/v2";
+import { configure } from "resultlog";
+
+setGlobalOptions({ timeoutSeconds: 60 }); // the platform's setting
+configure({
+  timeoutSeconds: 60,       // the same number, for resultlog
+  successSampleRate: 0.1,   // keep 10% of the fast successes
+  slowMs: 1000,
+  secretPatterns: [/internal-\d{6}/],
+});
+```
+
+`sink` receives every entry instead of the platform logger: use it to send entries somewhere else, or to print them in local development. Where each option is explained: [Timeouts](#timeouts), [Log cost](#log-cost), [Redaction](#redaction), [LLM calls](#llm-calls) (`price`), [Who made the call](#who-made-the-call) (`actor`), and [Testing](#testing) (`sink`).
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+### Idempotency
+
+#### `firestoreIdempotency` (function)
+
+Event triggers deliver at least once. This makes a handler run once per event: the first delivery claims the event in a Firestore transaction, a redelivery finds it done and skips the handler (logging `duplicate: true`). How claims, failures and leases behave is in [Duplicate events](#duplicate-events).
+
+**Signature:**
+
+```ts
+function firestoreIdempotency(
+  db: Pick<Firestore, "collection" | "runTransaction">,
+  options?: { collection?: string; ttlMs?: number }, // default "_resultlog_events" and 7 days
+): IdempotencyStore;
+
+interface IdempotencyStore {
+  claim(key: string, leaseMs: number): Promise<"claimed" | "done" | "in-flight">;
+  complete(key: string): Promise<void>;
+  release(key: string): Promise<void>;
+}
+```
+
+**Example:**
+
+```ts
+import { getFirestore } from "firebase-admin/firestore";
+import type { CloudEvent } from "firebase-functions/v2";
+import { type MessagePublishedData, onMessagePublished } from "firebase-functions/v2/pubsub";
+import { firestoreIdempotency, wrapEvent } from "resultlog";
+
+const idempotency = firestoreIdempotency(getFirestore());
+
+export const onPayment = onMessagePublished("payments", wrapEvent((event: CloudEvent<MessagePublishedData>) => charge(event), { idempotency }));
+```
+
+Any other store works: implement `IdempotencyStore`.
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+### Utilities
+
+#### `fingerprint` (function)
+
+A 12-character hex id that names a kind of failure. Every failure entry carries one, so you can count, group and query by it (`jsonPayload.fingerprint="b49c01a8ca7b"`), and `resultlog digest` groups its report by it. It is built from the error's name and code, where it was raised (the function and file, not the line, so a deploy doesn't change it) and, for an upstream failure, the provider and the class of the status. The message is left out, because it holds ids.
+
+**Signature:**
+
+```ts
+function fingerprint(error: AppError): string;
+```
+
+**Example:**
+
+```ts
+import { defineError, fingerprint } from "resultlog";
+
+class UserNotFound extends defineError("UserNotFound", { code: "not-found" }) {}
+
+const lookup = (id: string) => new UserNotFound(`users/${id} does not exist`);
+fingerprint(lookup("u9")); // "b49c01a8ca7b"
+fingerprint(lookup("u1")); // "b49c01a8ca7b": the same kind of failure
+```
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+### Testing
+
+`resultlog/testing` has what a test of a handler needs. Entries go to a sink you control, so a test can assert on what the handler logged. Call the wrapped handler itself (`const getUser = wrapCall(…)`), or `onCall(getUser).run(request)` to go through Firebase's own wrapper.
+
+```ts
+import { afterEach, expect, test } from "bun:test";
+import { callableRequest, captureLogs } from "resultlog/testing";
+
+const logs = captureLogs();
+// getUser is the handler wrapCall returned, before onCall(…) wraps it for Firebase
+afterEach(() => logs.clear());
+
+test("an unknown user is a warning, and the client is told why", async () => {
+  await expect(getUser(callableRequest({ id: "u9" }, { uid: "u1" }))).rejects.toMatchObject({
+    code: "not-found",
+    details: { reason: "UserNotFound" },
+  });
+  expect(logs.entries).toMatchObject([{ severity: "WARNING", errorName: "UserNotFound", authUid: "u1" }]);
+});
+```
+
+#### `captureLogs` (function)
+
+Collects the entries instead of printing them, by setting [`configure({ sink })`](#configure-function). `clear()` empties the list between tests; `restore()` puts the previous sink back. Without a sink, entries go to `firebase-functions/logger` as usual.
+
+**Signature:**
+
+```ts
+function captureLogs(): CapturedLogs;
+
+interface CapturedLogs {
+  readonly entries: LogEntry[];
+  clear(): void;
+  restore(): void;
+}
+```
+
+**Example:**
+
+```ts
+const logs = captureLogs();
+await getUser(callableRequest({ id: "u1" }, { uid: "u1" }));
+logs.entries[0]; // { severity: "INFO", message: "ok 3 ms", authUid: "u1", durationMs: 3, … } (the message starts with the function name where K_SERVICE is set)
+logs.restore();
+```
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+#### `callableRequest` (function)
+
+Builds the request an `onCall` handler receives, with an `auth` for the uid you give (none without it), the address and a user agent, and, if you pass `app`, an App Check result.
+
+**Signature:**
+
+```ts
+function callableRequest<T = unknown>(
+  data?: T,
+  options?: {
+    uid?: string;
+    token?: Record<string, unknown>; // the ID token's claims, e.g. { admin: true }
+    ip?: string;                      // default "127.0.0.1"
+    app?: { appId: string; alreadyConsumed?: boolean }; // alreadyConsumed: a replayed token
+  },
+): CallableRequest<T>;
+```
+
+**Example:**
+
+```ts
+const admin = callableRequest({ id: "u9" }, { uid: "u1", token: { admin: true } });
+const replayed = callableRequest({}, { uid: "u1", app: { appId: "1:123:web:abc", alreadyConsumed: true } });
+```
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+#### `httpExchange` (function)
+
+Builds a request and a response for a `wrapRequest` handler. `sent` records the status and the body the handler answered.
+
+**Signature:**
+
+```ts
+function httpExchange(options?: {
+  method?: string;                    // default "GET"
+  path?: string;                      // default "/"
+  body?: unknown;
+  headers?: Record<string, string>;
+}): { req: Request; res: Response; sent: { status?: number; body?: unknown } };
+```
+
+**Example:**
+
+```ts
+const handler = wrapRequest((req) => ok({ received: req.body.id }));
+const { req, res, sent } = httpExchange({ method: "POST", path: "/webhook", body: { id: "evt_1" } });
+await handler(req, res);
+sent; // { status: 200, body: { received: "evt_1" } }
+```
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+#### `cloudEvent` (function)
+
+Builds a CloudEvent for a `wrapEvent` handler, with the id and time a real trigger delivers.
+
+**Signature:**
+
+```ts
+function cloudEvent<T>(data: T, options?: Partial<CloudEvent<T>>): CloudEvent<T>; // id, type, source, time
+```
+
+**Example:**
+
+```ts
+const handler = wrapEvent((event: CloudEvent<{ id: string }>) => processOrder(event.data.id));
+await handler(cloudEvent({ id: "o1" }, { id: "evt-1" }));
+await handler(cloudEvent({ id: "o1" }, { id: "evt-1" })); // the same id again: a redelivery
+```
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+#### `authBlockingEvent` (function)
+
+Builds the event a blocking function receives: a sign-in by default; use an `eventType` ending in `beforeCreate:<provider>` for a sign-up.
+
+**Signature:**
+
+```ts
+function authBlockingEvent(options?: {
+  uid?: string;
+  ipAddress?: string;
+  userAgent?: string;
+  eventType?: string;
+  eventId?: string;
+}): AuthBlockingEvent;
+```
+
+**Example:**
+
+```ts
+const policy = wrapBlocking((event) => (isDenied(event.ipAddress) ? err(new BlockedAddress("on the deny list")) : ok()));
+await expect(policy(authBlockingEvent({ ipAddress: "198.51.100.9" }))).rejects.toMatchObject({ code: "permission-denied" });
+```
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+### In the app
+
+`resultlog/client` turns a failed call into what a screen needs. It has no server-side imports, so it is safe in a browser bundle.
+
+```ts
+import { httpsCallable } from "firebase/functions";
+import { parseError } from "resultlog/client";
+
+try {
+  await httpsCallable(functions, "createUser")(form);
+} catch (e) {
+  const error = parseError(e);
+  if (error.reason === "EmailTaken") showMessage(t("emailTaken")); // pick the text by the error's name
+  else if (Object.keys(error.fieldErrors).length > 0) showFieldErrors(error.fieldErrors); // zod issues, per field
+  else if (error.retryable) showRetryButton();
+  else showMessage(error.message);
+}
+```
+
+#### `parseError` (function)
+
+Reads the error a callable throws in the app (the Firebase JS SDK's `FunctionsError`) and returns a `ClientError`. It never throws, whatever it is given: anything that is not a callable's error, a network failure say, becomes `code: "unknown"` with its message.
+
+**Signature:**
+
+```ts
+function parseError(error: unknown): ClientError;
+
+interface ClientError {
+  code: string;                           // the Firebase code without its "functions/" prefix
+  reason?: string;                        // the error's name on the server, e.g. "EmailTaken" (WARNING errors from defineError)
+  message: string;                        // the public message
+  details: Record<string, unknown>;       // whatever else the server sent
+  issues: ClientIssue[];                  // the zod issues of an InvalidInput
+  fieldErrors: Record<string, string[]>;  // the same as messages per field: { "address.zip": ["Too small"] }; "_form" is the form as a whole
+  retryable: boolean;                     // unavailable, deadline-exceeded, resource-exhausted, aborted
+}
+
+interface ClientIssue {
+  path: (string | number)[];
+  message: string;
+  code?: string;
+}
+```
+
+**Example:**
+
+```ts
+const error = parseError(e);
+error.code;        // "invalid-argument"
+error.fieldErrors; // { quantity: ["Number must be greater than 0"] }
+```
+
+`retryable` means the server may succeed on a later try. Retry automatically only what is safe to repeat.
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+#### `parseErrorBody` (function)
+
+The same for a response from an `onRequest` function wrapped by `wrapRequest`: pass the parsed JSON body.
+
+**Signature:**
+
+```ts
+function parseErrorBody(body: unknown): ClientError;
+```
+
+**Example:**
+
+```ts
+const response = await fetch("/api/orders", { method: "POST", body: JSON.stringify(form) });
+if (!response.ok) {
+  const error = parseErrorBody(await response.json());
+  showMessage(error.message);
+}
+```
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+### Digest
+
+`resultlog/digest` turns a day of Cloud Logging entries into a report small enough to hand to an AI assistant, and runs the detection rules over them. It is what [`resultlog digest`](#resultlog-digest-command) uses.
+
+#### `parseLogs` (function)
+
+Reads what `gcloud logging read --format=json` returns (a JSON array), or one JSON value per line, as a log export gives. Lines that are not JSON are counted, not fatal.
+
+**Signature:**
+
+```ts
+function parseLogs(text: string): { logs: unknown[]; skipped: number };
+```
+
+**Example:**
+
+```ts
+import { readFileSync } from "node:fs";
+import { parseLogs } from "resultlog/digest";
+
+const { logs, skipped } = parseLogs(readFileSync("logs.json", "utf8"));
+```
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+#### `digest` (function)
+
+Returns the report as data and as Markdown: findings from the detection rules, failure groups by `fingerprint`, security events and their actors, slow or failing hosts, LLM usage, and reliability, with each sampled success counted at its weight. See [Investigating with an AI assistant](#investigating-with-an-ai-assistant) for what the report holds, and [Detecting unauthorized access](#detecting-unauthorized-access) for the rules.
+
+**Signature:**
+
+```ts
+function digest(logs: unknown[], options?: DigestOptions): { data: Digest; markdown: string };
+
+interface DigestOptions {
+  top?: number;                         // items per list. Default 10
+  maxChars?: number;                    // upper bound of the Markdown. Default 20000
+  pseudonymize?: boolean;               // uids, addresses and user agents become stable pseudonyms
+  admins?: string[];                    // uids allowed to change permissions and accounts
+  thresholds?: Record<string, number>;  // change a rule's threshold: { "authz-probing": 5 }
+  rules?: Rule[];                       // your own rules
+}
+
+interface Rule {
+  name: string;
+  severity: "info" | "low" | "medium" | "high";
+  summary: string;
+  hint: string;
+  filter(probe: Probe): boolean;        // which entries count
+  key(probe: Probe): string | undefined; // counted per key (an actor, an address)
+  distinct?(probe: Probe): string | undefined; // count distinct values instead of entries
+  threshold: number;
+  windowMs?: number;
+}
+```
+
+**Example:**
+
+```ts
+import { digest } from "resultlog/digest";
+
+const { data, markdown } = digest(logs, {
+  pseudonymize: true,
+  admins: ["u1"],
+  rules: [
+    {
+      name: "night-admin",
+      severity: "medium",
+      summary: "An administrative change was made at night.",
+      hint: "Check with the admin that it was them.",
+      filter: (p) => p.kind === "audit" && new Date(p.time ?? 0).getUTCHours() < 5,
+      key: (p) => p.uid,
+      threshold: 1,
+    },
+  ],
+});
+data.findings; // [{ rule: "night-admin", severity: "medium", subject: "u1", count: 1, … }]
+```
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+### Cloud Monitoring files
+
+`resultlog/monitoring` builds the log-based metrics, alert policies and dashboard of [Cloud Monitoring](#cloud-monitoring) as plain objects, and as the files that `gcloud` takes. It only produces data: it never talks to Google Cloud.
+
+#### `monitoring` (function)
+
+Returns the metrics, the alert policies and the dashboard as objects, so that a Terraform, Pulumi or CDK setup can build its resources from them.
+
+**Signature:**
+
+```ts
+function monitoring(options: MonitoringOptions): { metrics: Record<string, LogMetric>; alerts: Record<string, AlertPolicy>; dashboard: Record<string, any> };
+
+interface MonitoringOptions {
+  project: string;                            // your Google Cloud project id
+  prefix?: string;                            // names start with it. Default "resultlog"
+  services?: string[];                        // cover only these functions, by Cloud Run service name (the function name in lower case)
+  notificationChannels?: string[];            // "projects/PROJECT/notificationChannels/ID"
+  thresholds?: Partial<Record<"errors" | "security-events" | "timeouts" | "llm-problems", number>>;
+}
+```
+
+**Example:**
+
+```ts
+import { monitoring } from "resultlog/monitoring";
+
+const { alerts } = monitoring({ project: "my-project", services: ["checkout"], thresholds: { errors: 10 } });
+Object.keys(alerts); // ["server-errors", "security-events", "token-replay", …, "rules-changed", "iam-changed", …]
+```
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+#### `files` (function)
+
+Returns the file set that `resultlog monitoring` writes, by path: `metrics/*.json`, `alerts/*.json`, `dashboard.json` and a `README.md` that says which `gcloud` commands apply them.
+
+**Signature:**
+
+```ts
+function files(options: MonitoringOptions): Record<string, string>;
+```
+
+**Example:**
+
+```ts
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { files } from "resultlog/monitoring";
+
+for (const [path, content] of Object.entries(files({ project: "my-project" }))) {
+  mkdirSync(dirname(join("monitoring", path)), { recursive: true });
+  writeFileSync(join("monitoring", path), content);
+}
+```
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+### Command line
+
+The package installs one command, `resultlog`.
+
+#### `resultlog digest` (command)
+
+Reads Cloud Logging entries (a JSON array, or one JSON value per line) from a file or from stdin, and prints the [digest](#digest-function).
+
+**Usage:**
+
+```sh
+resultlog digest [file] [options]
+
+  --format markdown|json   Output format (default markdown)
+  --top N                  How many items to list per section (default 10)
+  --max-chars N            Upper bound of the Markdown (default 20000)
+  --pseudonymize           Replace uids, IP addresses and user agents with pseudonyms
+  --admins uid1,uid2       Uids allowed to change permissions and accounts; a change by anyone else is a high finding
+  --threshold rule=N       Change the threshold of a detection rule (repeatable)
+```
+
+**Example:**
+
+```sh
+gcloud logging read 'resource.type="cloud_run_revision"' --freshness=1d --limit=3000 --format=json \
+  | npx resultlog digest --pseudonymize > digest.md
+```
+
+[⬆️ Back to top](#table-of-contents)
+
+---
+
+#### `resultlog monitoring` (command)
+
+Writes the [Cloud Monitoring files](#files-function) into a directory. It only writes files and never talks to Google Cloud; the `README.md` it writes says which `gcloud` commands apply them.
+
+**Usage:**
+
+```sh
+resultlog monitoring --project PROJECT [options]
+
+  --project ID                  Your Google Cloud project id (required)
+  --out DIR                     Where to write the files (default ./monitoring)
+  --service a,b                 Cover only these functions, by Cloud Run service name
+  --notification-channel NAME   Where alerts notify, projects/PROJECT/notificationChannels/ID (repeatable)
+  --threshold name=N            errors, security-events, timeouts or llm-problems (repeatable)
+  --prefix NAME                 Prefix of the names (default resultlog)
+```
+
+**Example:**
+
+```sh
+npx resultlog monitoring --project my-project \
+  --notification-channel projects/my-project/notificationChannels/1234567890
+```
+
+[⬆️ Back to top](#table-of-contents)
+
+---
 
 ## Timeouts
 
@@ -124,42 +1508,6 @@ configure({ timeoutSeconds: 60 });         // the same number, for resultlog: th
 - `retry()` knows the deadline: it doesn't wait past it, and once it has passed it doesn't start another attempt.
 - A different timeout for one function: `wrapCall(fn, { timeoutSeconds: 300 })`, `wrapRequest(fn, { timeoutSeconds: 300 })` and `wrapEvent(fn, { timeoutSeconds: 300 })`. Without `timeoutSeconds` there is no guard.
 - For a function that is cut off, the entry is the only record of what it was doing. Whatever it still does in the background is not captured.
-
-## Logging inside a handler
-
-- `logContext.set(attrs)` adds fields to the invocation's single log entry. It pairs well with `andTee`: `.andTee((user) => logContext.set({ plan: user.plan }))`.
-- `logContext.debug(message, data?)` keeps a breadcrumb in memory (the latest 50). Breadcrumbs are written, as `breadcrumbs`, only if the invocation fails.
-- `logContext.error(error, data?)` records an error you recovered from (a cache miss you fell back from, say) under `handledErrors`. The invocation still succeeds. It pairs with `orElse`: `.orElse((e) => { logContext.error(e, { step: "cache" }); return readFromDb(); })`.
-- `logContext.audit(event, data?)` writes an audit entry right away (see [Security audit](#security-audit-and-investigation)). It also works outside a wrapped handler.
-- `logContext.security(event, data?, { severity? })` records a security event right away, with the actor and the label `security` (see [Detecting unauthorized access](#detecting-unauthorized-access)). Use it where nothing fails but something deserves a trail, such as `sensitive_read`.
-- `logContext.setActor(fields)` adds to the record of who made the request, for example a uid you verified yourself in `onRequest`.
-
-`set`, `debug`, `error` and `setActor` do nothing outside a wrapped handler. The context lives in `AsyncLocalStorage`, so concurrent invocations never mix.
-
-## Testing
-
-`resultlog/testing` has what a test of a handler needs. Entries go to a sink you control, so a test can assert on what the handler logged:
-
-```ts
-import { afterEach, expect, test } from "bun:test";
-import { callableRequest, captureLogs } from "resultlog/testing";
-
-const logs = captureLogs();
-afterEach(() => logs.clear());
-
-test("an unknown user is a warning, and the client is told why", async () => {
-  await expect(getUser(callableRequest({ id: "u9" }, { uid: "u1" }))).rejects.toMatchObject({
-    code: "not-found",
-    details: { reason: "UserNotFound" },
-  });
-  expect(logs.entries).toMatchObject([{ severity: "WARNING", errorName: "UserNotFound", authUid: "u1" }]);
-});
-```
-
-- `captureLogs()` collects the entries; `clear()` empties it between tests and `restore()` puts the previous sink back.
-- `callableRequest(data, { uid, token, ip })`, `httpExchange({ method, path, body, headers })` (it returns `{ req, res, sent }`, and `sent` records the status and body the handler answered) and `cloudEvent(data, { id, type, time })` build the inputs of `wrapCall`, `wrapRequest` and `wrapEvent`.
-- Call the wrapped handler itself (`const getUser = wrapCall(...)`), or `onCall(getUser).run(request)` to go through Firebase's own wrapper.
-- The option behind it is `configure({ sink })`: the sink receives every entry instead of the platform logger. Use it to send entries somewhere else, or to print them in local development. A sink that throws is ignored, because logging must never break the code being logged.
 
 ## What gets logged
 
@@ -223,50 +1571,6 @@ Server failure (ERROR), picked up by Error Reporting:
 - **Error Reporting's `context`.** ERROR and CRITICAL entries also carry `context.user` (the Firebase uid) and `context.httpRequest` (`method`, `url`, `responseStatusCode`, and `remoteIp` and `userAgent` by the same rule). These are the fields Error Reporting documents for the user and the request an error belongs to. Events have neither, so they get no `context`.
 
 How Logs Explorer summarizes an entry that has `httpRequest`, and what Error Reporting shows from `context`, have not been checked against a live project.
-
-## Errors
-
-`defineError(name, { code, publicMessage?, severity?, retryable? })` returns a subclass of `AppError`. Extend it with a named class, so that editor hovers and type errors say `UserNotFound` instead of an anonymous class:
-
-```ts
-class UserNotFound extends defineError("UserNotFound", { code: "not-found", publicMessage: "User not found." }) {}
-const e = new UserNotFound("users/u9 does not exist", { cause, context: { id: "u9" } });
-e instanceof UserNotFound; // true
-e.name; // "UserNotFound" (a literal type, so unions of errors can be narrowed by name)
-```
-
-- `message` is internal: it goes to the logs only.
-- `publicMessage` is the client's message. It defaults to the canonical status name, such as `"NOT_FOUND"`.
-- WARNING errors also give the client `details`. For named errors (made with `defineError`, and `ExternalError`) that includes `reason: error.name`, so the client can tell apart errors that share a code (two kinds of `already-exists`, for example) and pick its own translated text. `details` is an option on every error; it is public, so never put secrets in it. ERROR and CRITICAL errors give the client nothing beyond `publicMessage`.
-- `severity` defaults to `"ERROR"` when the code maps to an HTTP 5xx status (`internal`, `unknown`, `data-loss`, `unimplemented`, `unavailable`, `deadline-exceeded`) and to `"WARNING"` otherwise. ERROR and CRITICAL go to Error Reporting; WARNING doesn't.
-- `retryable` decides whether `wrapEvent` rethrows a failed event so that it is retried. It defaults to `severity !== "WARNING"`. Set it when the two differ: a rate limit isn't worth an alert but is worth a retry, and a bug in your code is worth an alert but retrying won't fix it.
-- `securityEvent` records the failure as a security event whatever the client is told, with the actor: an [OWASP Logging Vocabulary](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Vocabulary_Cheat_Sheet.html) name such as `authz_fail`. It lets you answer a request for someone else's order with `not-found`, which doesn't reveal that the order exists, and still see the attempt. Without it, `permission-denied` and `unauthenticated` count as `authz_fail`; `securityEvent: false` turns that off.
-- `error.withContext({ orderId })` adds fields while an error bubbles up through your layers.
-- For a one-off error, use `new AppError(message, { code, publicMessage?, severity?, retryable?, context?, details?, cause? })`.
-
-## In the app
-
-`resultlog/client` turns a failed call into what a screen needs. It has no server-side imports, so it is safe in a browser bundle.
-
-```ts
-import { httpsCallable } from "firebase/functions";
-import { parseError } from "resultlog/client";
-
-try {
-  await httpsCallable(functions, "createUser")(form);
-} catch (e) {
-  const error = parseError(e);
-  if (error.reason === "EmailTaken") showMessage(t("emailTaken")); // pick the text by the error's name
-  else if (Object.keys(error.fieldErrors).length > 0) showFieldErrors(error.fieldErrors); // zod issues, per field
-  else if (error.retryable) showRetryButton();
-  else showMessage(error.message);
-}
-```
-
-- `code` is the Firebase code without its `functions/` prefix. `reason` is the name of the error on the server (`"EmailTaken"`), which the server sends for WARNING errors made with `defineError`. `message` is the public message. `details` is whatever else the server sent.
-- `issues` are the zod issues of an `InvalidInput`, and `fieldErrors` the same as messages per field: `{ "address.zip": ["Too small"] }`. A problem with the form as a whole is under `"_form"`.
-- `retryable` is true for `unavailable`, `deadline-exceeded`, `resource-exhausted` and `aborted`: the server may succeed on a later try. Retry automatically only what is safe to repeat.
-- For an `onRequest` function wrapped by `wrapRequest`, use `parseErrorBody(await response.json())`.
 
 ## External APIs
 
@@ -530,10 +1834,7 @@ The copies count as ingestion, but Admin Activity volume is small. To make the b
 gcloud logging buckets update security-audit --location=global --locked
 ```
 
-Alerts need no code:
-
-- Count denials: `gcloud logging metrics create authz-fail --log-filter='labels.security="authz_fail"'`, then add a Cloud Monitoring alert on the metric, for example more than 20 in 5 minutes.
-- Watch risky admin changes with a log-based alert whose filter is, for example, `protoPayload.methodName:"SetIamPolicy" OR protoPayload.methodName="google.iam.admin.v1.CreateServiceAccountKey"`.
+Nothing in your functions has to change to record these, and `resultlog monitoring` generates the alerts for the ones that matter most: Security Rules deployed, IAM policies changed, service account keys created, and Firebase or API key settings changed. See [Changes made to the project itself](#changes-made-to-the-project-itself). To count denials, which is a metric of resultlog's own entries: `gcloud logging metrics create authz-fail --log-filter='labels.security="authz_fail"'`, then add a Cloud Monitoring alert on the metric, for example more than 20 in 5 minutes.
 
 Investigation queries for Logs Explorer:
 
@@ -573,18 +1874,10 @@ Audit and security entries carry the `actor`. `configure({ actor: "all" })` puts
 
 ### Sign-ins: wrapBlocking
 
-```ts
-import { beforeUserSignedIn } from "firebase-functions/v2/identity";
+[`wrapBlocking`](#wrapblocking-function) puts Identity Platform's `beforeUserSignedIn` and `beforeUserCreated` on the record: every sign-in that gets through is the audit event `authn_login_success` (a sign-up is `user_created`), and a denial is the security event `authn_login_fail`.
 
-export const onSignIn = beforeUserSignedIn(
-  wrapBlocking((event) => (isDenied(event.ipAddress) ? err(new BlockedAddress("on the deny list")) : ok({ sessionClaims: { plan: "free" } }))),
-);
-```
-
-- Every sign-in that gets through is the audit event `authn_login_success` (a sign-up is `user_created`), with the address, the user agent and the sign-in method. Returning an `AppError` denies the sign-in: Firebase gets an `HttpsError`, and the log gets `authn_login_fail` (or the `securityEvent` the error names). What `fn` returns on success goes back to Firebase: custom claims, `disabled`, and so on.
-- It needs the project to be upgraded to Firebase Authentication with Identity Platform. Firebase gives a blocking function 7 seconds, so the timeout guard defaults to 7 here whatever the global timeout is.
 - A policy that breaks (an exception, a timeout) denies the sign-in. A broken blocking function locks everyone out, so `failOpen: true` lets the sign-in through instead and logs the failure; a denial the policy returns on purpose is always honoured.
-- It runs after the credentials were verified, so a wrong password never gets here. In the Auth emulator the address and user agent are placeholders.
+- It needs the project to be upgraded to Firebase Authentication with Identity Platform, and it runs after the credentials were verified, so a wrong password never gets here.
 
 ### Alerts
 
@@ -636,7 +1929,6 @@ const { data } = digest(logs, {
 - **No geolocation, IP reputation or device fingerprints.** They need data resultlog doesn't have.
 - **Not verified against a live project:** the mapping of the labels, the alerts, and Identity Platform in production (the blocking function was exercised in the Auth emulator only).
 
-
 ## Cloud Monitoring
 
 resultlog's entries are meant to be read and alerted on in Cloud Logging and Cloud Monitoring. You can set that up by hand in the console with the recipes below, or have `resultlog monitoring` write the setup as files.
@@ -663,9 +1955,23 @@ resource.type="cloud_run_revision" AND jsonPayload.errorName="DeadlineExceeded"
 
 # An LLM answer cut off, withheld or interrupted
 resource.type="cloud_run_revision" AND (jsonPayload.llm.truncated>0 OR jsonPayload.llm.blocked>0 OR jsonPayload.llm.interrupted>0)
+
+# Firebase Security Rules were created, deployed or deleted
+logName:"cloudaudit.googleapis.com%2Factivity" AND protoPayload.serviceName="firebaserules.googleapis.com" AND protoPayload.methodName:("CreateRuleset" OR "CreateRelease" OR "UpdateRelease" OR "DeleteRelease" OR "DeleteRuleset")
+
+# An IAM policy was set: members added, roles changed
+logName:"cloudaudit.googleapis.com%2Factivity" AND protoPayload.methodName:"SetIamPolicy"
+
+# A service account key was created or uploaded
+logName:"cloudaudit.googleapis.com%2Factivity" AND protoPayload.serviceName="iam.googleapis.com" AND protoPayload.methodName=("google.iam.admin.v1.CreateServiceAccountKey" OR "google.iam.admin.v1.UploadServiceAccountKey")
+
+# Firebase project settings or an API key were changed
+logName:"cloudaudit.googleapis.com%2Factivity" AND protoPayload.serviceName=("firebase.googleapis.com" OR "apikeys.googleapis.com")
 ```
 
-To be told when one particular failure comes back, add `AND jsonPayload.fingerprint="…"` to the first filter; the digest and the entry give the fingerprint. Narrow any of them to one function with `AND resource.labels.service_name="getuser"`.
+The last four are not about your functions: they are entries Google writes about the project itself, so they have no `resource.type="cloud_run_revision"`. See [Changes made to the project itself](#changes-made-to-the-project-itself).
+
+To be told when one particular failure comes back, add `AND jsonPayload.fingerprint="…"` to the first filter; the digest and the entry give the fingerprint. Narrow any of the first six to one function with `AND resource.labels.service_name="getuser"`.
 
 **Rows that say more.** Logs Explorer shows each entry as a line with chips. In **Preferences → Manage summary fields**, add `jsonPayload.errorName`, `jsonPayload.durationMs`, `jsonPayload.authUid` and `jsonPayload.securityEvent`, then **Apply**. Each row then shows the kind of failure, how long it took, who called and the security event next to the message. It is a display setting: it changes nothing that is logged.
 
@@ -683,15 +1989,33 @@ Find a channel's name with `gcloud beta monitoring channels list --format='value
 ### What you get
 
 - **9 log-based metrics**, all counters: failures (by error name, error code and severity), security events and audit events (by kind), timeouts, cold starts, duplicate events, and LLM answers cut off, withheld and interrupted. Their labels hold few values on purpose: a label with a user id or an address would cost a time series for each.
-- **6 alert policies**, each with documentation that says what it means, what to do and how to look closer with the digest:
+- **10 alert policies**, each with documentation that says what it means and what to do. The first six come with the digest command that looks closer:
   - **server errors**: more than 5 in 5 minutes for one function (ERROR or worse; expected failures such as not-found don't count);
   - **security events surge**: more than 20 of one kind in 5 minutes;
   - **App Check token replayed** and **permissions or accounts changed**: log-based alerts, which notify on the entry itself (at most once in 5 minutes), because these are rare and a count over a window would hide them;
   - **functions timing out**: more than 3 in 10 minutes;
-  - **LLM answers cut off, withheld or interrupted**: more than 5 of any kind in 10 minutes.
+  - **LLM answers cut off, withheld or interrupted**: more than 5 of any kind in 10 minutes;
+  - four **log-based alerts about the project itself**: Firebase Security Rules changed, IAM policy changed, service account key created, Firebase project or API key changed. See [Changes made to the project itself](#changes-made-to-the-project-itself).
 - **A dashboard**, "resultlog: functions": Cloud Run's own request count and latency (p50, p95), then resultlog's metrics (failures, security events, audit events, timeouts, duplicates and cold starts, LLM problems), and two panels that list the entries: security and audit entries, and failures.
 
 Options: `--service checkout,on-order` covers only those functions (by Cloud Run service name, which is the function name in lower case), `--threshold errors=10` changes an alert's threshold (`errors`, `security-events`, `timeouts`, `llm-problems`), `--prefix` changes the names, and `--out` the directory (default `./monitoring`). The generated `README.md` in it explains each file.
+
+### Changes made to the project itself
+
+Google Cloud writes an Admin Activity audit log entry whenever someone changes the project: deploys Security Rules, sets an IAM policy, creates a service account key, adds a Firebase app or edits an API key. These entries are **always written, and can't be configured, excluded or switched off**, and they cost nothing, so recording them needs nothing from you and nothing in your functions. What does not happen by itself is a notification: Cloud Logging tells nobody until an alert exists. `resultlog monitoring` writes four log-based alerts for them (the same filters as in the console recipes above, so that you can also create them by hand):
+
+| Alert | Fires on | Why it matters |
+|---|---|---|
+| Firebase Security Rules changed | `CreateRuleset`, `CreateRelease`, `UpdateRelease`, `DeleteRelease`, `DeleteRuleset` of `firebaserules.googleapis.com` | the rules are what stands between your data and everyone else; open rules are how data leaks |
+| IAM policy changed | any `SetIamPolicy`: the project, a service account (`google.iam.admin.v1.SetIAMPolicy`), a function made public, and other resources | who can do what, or impersonate whom |
+| Service account key created | `CreateServiceAccountKey` and `UploadServiceAccountKey` of `iam.googleapis.com` | a key is a password in a file that does not expire |
+| Firebase project or API key changed | everything written by `firebase.googleapis.com` (apps, SHA certificates, the project) and `apikeys.googleapis.com` (API keys are the API Keys API's, not Firebase's) | a new app or a key without its restrictions widens who can call your backend |
+
+- Each notifies at most once in 5 minutes and names, in its documentation, the `gcloud logging read` command that shows who did it and from where (`protoPayload.authenticationInfo.principalEmail`, `protoPayload.requestMetadata.callerIp`).
+- **They also fire on your own work.** A deploy of your rules is a rules change. That is the point of an alert like this: you check that it was you. If a team deploys rules many times a day and wants the alert only for other people, narrow the filter by the principal (`AND NOT protoPayload.authenticationInfo.principalEmail:"ci@"` and so on).
+- `:` ignores case and matches a part of the value. That is why `SetIamPolicy` also catches the service account variant `google.iam.admin.v1.SetIAMPolicy`; an exact `="SetIamPolicy"` would see only the project's.
+- They see **changes**, not reads. Reading a key's value or a project's configuration is a Data Access audit log, which is off by default and can grow large.
+- `--service` and `--prefix` apply to the function alerts; these four look at the whole project. Apply only the ones you want: each alert is its own file under `alerts/`.
 
 ### Applying it
 
@@ -713,8 +2037,7 @@ From code, `import { monitoring, files } from "resultlog/monitoring"`: `monitori
 - **Per user or per address is not in the metrics.** Run the digest for that.
 - **Cost.** User-defined log-based metrics are billed under Cloud Monitoring's pricing, and every distinct label value is a time series. The generated labels are event names, error names and severities. Add no label that holds an id.
 - **Second-generation functions only:** the filters select `resource.type="cloud_run_revision"`.
-- **Not applied to a live project here.** The files follow Google's API reference, and the filters are tested against the entries the library really writes, but nobody has applied them to a real project yet. Start with `dashboards create --validate-only`, read the output of the first run, and expect to adjust a field or two.
-
+- **Check the first run.** The files follow Google's API reference, and the filters are tested against the entries the library really writes and the Admin Activity entries Google documents. Start with `dashboards create --validate-only` and read the output of the first run: if Google's API asks for a field to be adjusted, the files are plain JSON.
 
 ## Investigating with an AI assistant
 
@@ -785,7 +2108,7 @@ Circular references become `"[Circular]"` and `bigint` values become strings. Ob
 
 ## Limitations
 
-- Only work inside a wrapped handler is captured.
+- Only work inside a wrapped handler is captured. What Google Cloud records about the project itself (Security Rules, IAM, keys) is in the Admin Activity audit log, which [`resultlog monitoring`](#changes-made-to-the-project-itself) watches.
 - When `wrapEvent` rethrows, the Functions runtime may log the error again, so Error Reporting can count it twice.
 - The timeout guard answers for a slow invocation but can't stop its code. Pass `logContext.signal` to the calls that can be cancelled.
 - A stack trace survives only if what you return or throw is an `Error`. Return `AppError` subclasses, not strings.
