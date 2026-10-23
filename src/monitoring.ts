@@ -146,6 +146,28 @@ function documentation(means: string, todo: string): Json {
   };
 }
 
+// What Google Cloud itself records about the project, in the Admin Activity audit log. It is always written, and cannot be
+// configured, excluded or switched off, so these alerts need nothing else to be turned on. Its entries are not the
+// functions' (another resource type, no jsonPayload from resultlog), so the --service scope does not apply to them. The
+// method names are the ones Google documents; `:` ignores case and takes a part, which is what makes "SetIamPolicy" cover
+// the service account variant `google.iam.admin.v1.SetIAMPolicy` and the ones with a prefix.
+const ADMIN_ACTIVITY = 'logName:"cloudaudit.googleapis.com%2Factivity"';
+const CHANGE_FILTERS = {
+  rules: `${ADMIN_ACTIVITY} AND protoPayload.serviceName="firebaserules.googleapis.com" AND protoPayload.methodName:("CreateRuleset" OR "CreateRelease" OR "UpdateRelease" OR "DeleteRelease" OR "DeleteRuleset")`,
+  iam: `${ADMIN_ACTIVITY} AND protoPayload.methodName:"SetIamPolicy"`,
+  key: `${ADMIN_ACTIVITY} AND protoPayload.serviceName="iam.googleapis.com" AND protoPayload.methodName=("google.iam.admin.v1.CreateServiceAccountKey" OR "google.iam.admin.v1.UploadServiceAccountKey")`,
+  // API keys are not under firebase.googleapis.com: they are the API Keys API's.
+  firebase: `${ADMIN_ACTIVITY} AND protoPayload.serviceName=("firebase.googleapis.com" OR "apikeys.googleapis.com")`,
+};
+
+function changeDocumentation(means: string, todo: string, filter: string): Json {
+  const who = "table(timestamp,protoPayload.authenticationInfo.principalEmail,protoPayload.requestMetadata.callerIp,protoPayload.methodName)";
+  return {
+    mimeType: "text/markdown",
+    content: `**What it means:** ${means}\n\n**What to do:** ${todo}\n\nWho did it, and from where: \`gcloud logging read '${filter}' --freshness=1d --format='${who}'\``,
+  };
+}
+
 function alerts(prefix: string, services: string[], channels: string[], thresholds: Partial<Record<ThresholdName, number>>): Record<string, AlertPolicy> {
   const base = { enabled: true, combiner: "OR", notificationChannels: channels, userLabels: { source: "resultlog" } };
   const counted = (title: string, key: string, extra: string, groupBy: string[], value: number, minutes: number): Json => ({
@@ -230,6 +252,54 @@ function alerts(prefix: string, services: string[], channels: string[], threshol
         counted("Answers withheld", "llm_blocked", "", [], llm, 10),
         counted("Streams interrupted", "llm_interrupted", "", [], llm, 10),
       ],
+    },
+    "rules-changed": {
+      ...base,
+      displayName: `${prefix}: Firebase Security Rules changed`,
+      severity: "ERROR",
+      alertStrategy: { notificationRateLimit: { period: "300s" } },
+      documentation: changeDocumentation(
+        "Someone created, updated or deleted a ruleset or a release of Firebase Security Rules (Firestore, Cloud Storage, Realtime Database). Deploying your own rules does exactly this.",
+        "Check that it was your deploy: the entry names the account and the address. A rule that opens a collection to everyone is how data leaks.",
+        CHANGE_FILTERS.rules,
+      ),
+      conditions: [{ displayName: "Security Rules changed", conditionMatchedLog: { filter: CHANGE_FILTERS.rules } }],
+    },
+    "iam-changed": {
+      ...base,
+      displayName: `${prefix}: IAM policy changed`,
+      severity: "ERROR",
+      alertStrategy: { notificationRateLimit: { period: "300s" } },
+      documentation: changeDocumentation(
+        "An IAM policy was set: members were added or removed or roles changed, on the project, on a service account, or on another resource such as a function (making a function public grants allUsers the invoker role).",
+        "Check that the change was meant. The entry's request and response hold the policy that was set.",
+        CHANGE_FILTERS.iam,
+      ),
+      conditions: [{ displayName: "IAM policy set", conditionMatchedLog: { filter: CHANGE_FILTERS.iam } }],
+    },
+    "service-account-key": {
+      ...base,
+      displayName: `${prefix}: service account key created`,
+      severity: "ERROR",
+      alertStrategy: { notificationRateLimit: { period: "300s" } },
+      documentation: changeDocumentation(
+        "A key, a JSON file that works as a password, was created for a service account, or one was uploaded.",
+        "Prefer no keys at all (attached service accounts, workload identity). If it was not you, delete the key at once with `gcloud iam service-accounts keys delete`, then rotate whatever the account can reach and look at what it has done.",
+        CHANGE_FILTERS.key,
+      ),
+      conditions: [{ displayName: "Service account key created", conditionMatchedLog: { filter: CHANGE_FILTERS.key } }],
+    },
+    "firebase-changed": {
+      ...base,
+      displayName: `${prefix}: Firebase project or API key changed`,
+      severity: "WARNING",
+      alertStrategy: { notificationRateLimit: { period: "300s" } },
+      documentation: changeDocumentation(
+        "A setting of the Firebase project changed (an app was added, changed or removed, a SHA certificate, the project itself), or an API key was created or changed.",
+        "Check that it was meant. An app you do not know, or a key whose restrictions were lifted, is worth acting on.",
+        CHANGE_FILTERS.firebase,
+      ),
+      conditions: [{ displayName: "Firebase project or API key changed", conditionMatchedLog: { filter: CHANGE_FILTERS.firebase } }],
     },
   };
 }
@@ -389,6 +459,7 @@ ${channels ? "The alerts notify the channels you gave." : "The alerts have no no
 - Counts come from log entries. With \`successSampleRate\` below 1 the metrics still count every failure, security event and audit event (those are always logged); only ordinary successes are thinned, which is why the request charts use Cloud Run's own metrics.
 - Per user or per address, run the digest: \`gcloud logging read 'resource.type="cloud_run_revision"' --freshness=1d --format=json | npx resultlog digest\`.
 - Thresholds are starting points: generate again with \`--threshold errors=10\` and replace the policy as described above.
+- Four of the alerts (Security Rules changed, IAM policy changed, service account key created, Firebase project or API key changed) are not about the functions: they watch the Admin Activity audit log, which Google always writes, for the whole project. They fire on your own deploys and changes too, which is the point: check that it was you. Delete the files under \`alerts/\` that you do not want before you apply.
 `;
 }
 

@@ -18,43 +18,46 @@ function lookup(entry: Json, path: string): unknown {
 
 const SEVERITIES = ["DEFAULT", "DEBUG", "INFO", "NOTICE", "WARNING", "ERROR", "CRITICAL", "ALERT", "EMERGENCY"];
 
-/** field=value, field:*, field=~"re", field>n, field>=n (severity by rank), field=("a" OR "b"), joined by AND / OR, with parentheses. */
+/**
+ * field=value, field:*, field:"part", field=~"re", field>n, field>=n (severity by rank), field=("a" OR "b"), joined by
+ * AND / OR, with parentheses. As in Logging: OR binds tighter than AND, and = and : ignore letter case (=~ does not).
+ */
 function matches(filter: string, entry: Json): boolean {
   const tokens = filter.match(/"(?:[^"\\]|\\.)*"|=~|>=|<=|[()=:<>]|\*|\bAND\b|\bOR\b|[^\s()=:<>"*]+/g) ?? [];
   let at = 0;
   const peek = () => tokens[at];
   const take = () => tokens[at++] as string;
   const unquote = (token: string) => (token.startsWith('"') ? JSON.parse(token) : token);
-  const orExpr = (): boolean => {
-    let result = andExpr();
-    while (peek() === "OR") {
+  const andExpr = (): boolean => {
+    let result = orExpr();
+    while (peek() === "AND") {
       take();
-      const right = andExpr();
-      result = result || right;
+      const right = orExpr();
+      result = result && right;
     }
     return result;
   };
-  const andExpr = (): boolean => {
+  const orExpr = (): boolean => {
     let result = term();
-    while (peek() === "AND") {
+    while (peek() === "OR") {
       take();
       const right = term();
-      result = result && right;
+      result = result || right;
     }
     return result;
   };
   const term = (): boolean => {
     if (peek() === "(") {
       take();
-      const inner = orExpr();
+      const inner = andExpr();
       expect(take()).toBe(")");
       return inner;
     }
     const field = take();
     const op = take();
     const actual = lookup(entry, field);
-    if (op === ":") {
-      expect(take()).toBe("*");
+    if (op === ":" && peek() === "*") {
+      take();
       return actual !== undefined && actual !== null;
     }
     let expected: string[];
@@ -70,7 +73,9 @@ function matches(filter: string, entry: Json): boolean {
       expected = [unquote(take())];
     }
     if (actual === undefined || actual === null) return false;
-    if (op === "=") return expected.some((e) => String(actual) === e);
+    const text = String(actual).toLowerCase();
+    if (op === "=") return expected.some((e) => text === e.toLowerCase());
+    if (op === ":") return expected.some((e) => text.includes(e.toLowerCase()));
     if (op === "=~") return expected.some((e) => new RegExp(e).test(String(actual)));
     const [a, b] = field === "severity" ? [SEVERITIES.indexOf(String(actual)), SEVERITIES.indexOf(expected[0] as string)] : [Number(actual), Number(expected[0])];
     if (op === ">") return a > b;
@@ -79,7 +84,7 @@ function matches(filter: string, entry: Json): boolean {
     if (op === "<=") return a <= b;
     throw new Error(`unsupported operator ${op}`);
   };
-  const result = orExpr();
+  const result = andExpr();
   expect(at).toBe(tokens.length); // the whole filter was understood
   return result;
 }
@@ -296,7 +301,7 @@ describe("alert policies", () => {
       expect(policy.enabled).toBe(true);
       expect(policy.notificationChannels).toEqual([channel]);
       expect(policy.documentation.mimeType).toBe("text/markdown");
-      expect(policy.documentation.content).toContain("resultlog digest");
+      expect(policy.documentation.content).toMatch(/resultlog digest|gcloud logging read/);
       expect(policy.userLabels).toEqual({ source: "resultlog" });
     }
     expect(new Set(Object.values(alerts).map((p) => p.displayName)).size).toBe(Object.keys(alerts).length);
@@ -343,7 +348,14 @@ describe("alert policies", () => {
     const entries = await scenarios();
     const { alerts } = monitoring(options);
     const logBased = Object.values(alerts).filter((p) => p.conditions.some((c: Json) => c.conditionMatchedLog));
-    expect(logBased.map((p) => p.displayName).sort()).toEqual(["resultlog: App Check token replayed", "resultlog: permissions or accounts changed"]);
+    expect(logBased.map((p) => p.displayName).sort()).toEqual([
+      "resultlog: App Check token replayed",
+      "resultlog: Firebase Security Rules changed",
+      "resultlog: Firebase project or API key changed",
+      "resultlog: IAM policy changed",
+      "resultlog: permissions or accounts changed",
+      "resultlog: service account key created",
+    ]);
     for (const policy of logBased) {
       expect(policy.conditions).toHaveLength(1); // a log match must be the only condition
       expect(policy.alertStrategy.notificationRateLimit.period).toMatch(/^\d+s$/); // required for log-based alerts
@@ -352,8 +364,8 @@ describe("alert policies", () => {
     expect(logBased.find((p) => p.displayName.includes("replayed"))?.severity).toBe("CRITICAL");
     expect(matches(filterOf("replayed"), asLogEntry(entries.replay?.[0] as Json))).toBe(true);
     expect(matches(filterOf("replayed"), asLogEntry(entries.security?.[0] as Json))).toBe(false);
-    expect(matches(filterOf("changed"), asLogEntry(entries.audit?.[0] as Json))).toBe(true);
-    expect(matches(filterOf("changed"), asLogEntry(entries["audit-read"]?.[0] as Json))).toBe(false);
+    expect(matches(filterOf("permissions or accounts changed"), asLogEntry(entries.audit?.[0] as Json))).toBe(true);
+    expect(matches(filterOf("permissions or accounts changed"), asLogEntry(entries["audit-read"]?.[0] as Json))).toBe(false);
   });
 
   test("the LLM alert watches the three kinds of bad answer, as separate conditions in one policy", () => {
@@ -386,6 +398,109 @@ describe("alert policies", () => {
         }
         if (condition.conditionMatchedLog) only(condition.conditionMatchedLog, allowed.matched);
       }
+    }
+  });
+});
+
+// What Google Cloud itself records about the project, in the Admin Activity log: always written, and it cannot be switched
+// off. The method names are the ones Google documents for each service. The functions' own entries never match these.
+describe("alerts for changes made to the project itself", () => {
+  const activity = "projects/my-project-123/logs/cloudaudit.googleapis.com%2Factivity";
+  const audit = (serviceName: string, methodName: string, logName = activity): Json => ({
+    logName,
+    severity: "NOTICE",
+    resource: { type: "audited_resource" },
+    protoPayload: {
+      "@type": "type.googleapis.com/google.cloud.audit.AuditLog",
+      serviceName,
+      methodName,
+      authenticationInfo: { principalEmail: "someone@example.com" },
+      requestMetadata: { callerIp: "203.0.113.5" },
+    },
+  });
+  const dataAccess = "projects/my-project-123/logs/cloudaudit.googleapis.com%2Fdata_access";
+  const rules = (method: string, log?: string) => audit("firebaserules.googleapis.com", `google.firebase.rules.v1.FirebaseRulesService.${method}`, log);
+
+  // alert -> the entries it must fire on, and the ones it must not
+  const cases: Record<string, { fires: Json[]; quiet: Json[] }> = {
+    "rules-changed": {
+      fires: ["CreateRuleset", "CreateRelease", "UpdateRelease", "DeleteRelease", "DeleteRuleset"].map((method) => rules(method)),
+      quiet: [rules("GetRuleset", dataAccess), rules("ListReleases", dataAccess), audit("firebase.googleapis.com", "google.firebase.service.v1beta1.WebAppService.UpdateWebApp")],
+    },
+    "iam-changed": {
+      fires: [
+        audit("cloudresourcemanager.googleapis.com", "SetIamPolicy"),
+        audit("iam.googleapis.com", "google.iam.admin.v1.SetIAMPolicy"), // a service account's policy: the capital IAM is how Google writes it
+        audit("iam.googleapis.com", "google.iam.v1.WorkloadIdentityPools.SetIamPolicy"),
+      ],
+      quiet: [audit("cloudresourcemanager.googleapis.com", "GetIamPolicy", dataAccess), audit("iam.googleapis.com", "google.iam.admin.v1.CreateServiceAccount")],
+    },
+    "service-account-key": {
+      fires: [audit("iam.googleapis.com", "google.iam.admin.v1.CreateServiceAccountKey"), audit("iam.googleapis.com", "google.iam.admin.v1.UploadServiceAccountKey")],
+      quiet: [
+        audit("iam.googleapis.com", "google.iam.admin.v1.DeleteServiceAccountKey"),
+        audit("iam.googleapis.com", "google.iam.admin.v1.GetServiceAccountKey", dataAccess),
+        audit("iam.googleapis.com", "google.iam.admin.v1.CreateServiceAccount"),
+      ],
+    },
+    "firebase-changed": {
+      fires: [
+        audit("firebase.googleapis.com", "google.firebase.service.v1beta1.WebAppService.UpdateWebApp"),
+        audit("firebase.googleapis.com", "google.firebase.service.v1beta1.FirebaseProjectService.UpdateFirebaseProject"),
+        audit("apikeys.googleapis.com", "google.api.apikeys.v2.ApiKeys.UpdateKey"), // API keys are not under firebase.googleapis.com
+        audit("apikeys.googleapis.com", "google.api.apikeys.v2.ApiKeys.CreateKey"),
+      ],
+      quiet: [
+        audit("firebase.googleapis.com", "google.firebase.service.v1beta1.WebAppService.GetWebApp", dataAccess),
+        rules("UpdateRelease"),
+        audit("iam.googleapis.com", "google.iam.admin.v1.SetIAMPolicy"),
+      ],
+    },
+  };
+  const filterOf = (slug: string, options_ = options) => ((monitoring(options_).alerts[slug] as Json).conditions[0] as Json).conditionMatchedLog.filter as string;
+
+  test("there is one log-based policy for each, alone in its policy, with the rate limit the API requires", () => {
+    for (const slug of Object.keys(cases)) {
+      const policy = monitoring(options).alerts[slug] as Json;
+      expect(policy, slug).toBeDefined();
+      expect(policy.conditions).toHaveLength(1);
+      expect(policy.conditions[0].conditionMatchedLog).toBeDefined();
+      expect(policy.alertStrategy.notificationRateLimit.period).toMatch(/^\d+s$/);
+      expect(["ERROR", "WARNING"]).toContain(policy.severity);
+    }
+  });
+
+  test("each fires on the Admin Activity entries it is for, and on nothing else", () => {
+    for (const [slug, { fires, quiet }] of Object.entries(cases)) {
+      for (const entry of fires) expect(matches(filterOf(slug), entry), `${slug} fires on ${entry.protoPayload.methodName}`).toBe(true);
+      for (const entry of quiet) expect(matches(filterOf(slug), entry), `${slug} stays quiet on ${entry.protoPayload.methodName} in ${entry.logName.split("%2F")[1]}`).toBe(false);
+    }
+  });
+
+  test("they watch the project, not the functions: --service does not narrow them, and the functions' entries never match", async () => {
+    const entries = all(await scenarios()).map((entry) => asLogEntry(entry));
+    for (const slug of Object.keys(cases)) {
+      expect(filterOf(slug)).not.toContain("cloud_run_revision");
+      expect(filterOf(slug, { ...options, services: ["checkout"] } as typeof options)).toBe(filterOf(slug));
+      for (const entry of entries) expect(matches(filterOf(slug), entry)).toBe(false);
+    }
+  });
+
+  test("the function alerts do not fire on them", () => {
+    const functionAlerts = Object.entries(monitoring(options).alerts).filter(([slug]) => !(slug in cases));
+    for (const [slug, policy] of functionAlerts) {
+      for (const condition of (policy as Json).conditions as Json[]) {
+        if (!condition.conditionMatchedLog) continue;
+        for (const { fires } of Object.values(cases)) for (const entry of fires) expect(matches(condition.conditionMatchedLog.filter, entry), slug).toBe(false);
+      }
+    }
+  });
+
+  test("their documentation says how to see who did it, from the Admin Activity log", () => {
+    for (const slug of Object.keys(cases)) {
+      const content = (monitoring(options).alerts[slug] as Json).documentation.content as string;
+      expect(content, slug).toContain("protoPayload.authenticationInfo.principalEmail");
+      expect(content, slug).toContain("cloudaudit.googleapis.com%2Factivity");
     }
   });
 });
@@ -502,6 +617,12 @@ describe("files and the README", () => {
     expect(readme).toContain("--validate-only");
   });
 
+  test("it tells the reader that four alerts watch the project itself, and that they fire on their own work too", () => {
+    expect(readme).toContain("Admin Activity");
+    expect(readme).toContain("whole project");
+    expect(readme).toMatch(/your own (deploys|changes|work)/);
+  });
+
   test("the commands apply the metrics, then the policies, then the dashboard, to the project", () => {
     // A stand-in for gcloud that records every call, so that what the README tells people to run is run here.
     const work = mkdtempSync(join(tmpdir(), "resultlog-monitoring-"));
@@ -551,10 +672,21 @@ describe("the console recipes in the README", () => {
     ["jsonPayload.llm", ["llm-truncated", "llm-blocked", "llm-interrupted"]],
   ];
 
+  // The recipes about the project itself (Google's Admin Activity entries, not the functions') are the generated alerts' filters.
+  const aboutTheProject = recipes.filter(({ filter }) => filter.startsWith("logName:"));
+  const aboutFunctions = recipes.filter(({ filter }) => !filter.startsWith("logName:"));
+
+  test("the recipes about the project itself are the generated alerts' filters, word for word", () => {
+    const generated = ["rules-changed", "iam-changed", "service-account-key", "firebase-changed"].map(
+      (slug) => ((monitoring(options).alerts[slug] as Json).conditions[0] as Json).conditionMatchedLog.filter as string,
+    );
+    expect(aboutTheProject.map(({ filter }) => filter)).toEqual(generated);
+  });
+
   test("each one matches the entries it is meant for, and no others", async () => {
     const made = await scenarios();
-    expect(recipes).toHaveLength(meant.length); // a new recipe needs its line above
-    for (const { title, filter } of recipes) {
+    expect(aboutFunctions).toHaveLength(meant.length); // a new recipe needs its line above
+    for (const { title, filter } of aboutFunctions) {
       const expected = meant.find(([needle]) => filter.includes(needle))?.[1];
       expect(expected, title).toBeDefined();
       for (const [name, entries] of Object.entries(made)) {
