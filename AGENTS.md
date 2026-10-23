@@ -20,6 +20,8 @@ resultlog is a TypeScript library for Firebase Functions (v2) built on neverthro
     npx tsc --noEmit            # typecheck, tests included
     npm run build               # dist/esm and dist/cjs (what `npm pack` ships)
     npm run smoke               # the build, on the Node that runs it (CI does it on Node 20, 22, 24 and 26)
+
+Development needs Node 22 or later, because firebase-admin 14, a devDependency, does: on Node 20 npm skips its Firestore dependency without a word, and the build fails on a type it cannot find. The package itself runs on Node 20 (the peer range allows firebase-admin 11.10 and up).
     npm pack --dry-run
 
 ## Conventions

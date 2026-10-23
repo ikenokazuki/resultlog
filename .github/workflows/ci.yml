@@ -51,9 +51,11 @@ jobs:
       - name: What a publish would contain
         run: npm pack --dry-run
 
-  # The unit tests run on Bun and production runs on Node, so the build itself is run on every Node it supports.
+  # The unit tests run on Bun and production runs on Node, so the built package is run on every Node it supports. It is
+  # installed and built on Node 24 everywhere: firebase-admin 14, a devDependency, needs Node 22 or later, and so does its
+  # Firestore dependency, which npm skips on Node 20 without a word (the build then fails on a type it cannot find).
   node:
-    name: Build on Node ${{ matrix.node }}
+    name: Smoke test on Node ${{ matrix.node }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -68,7 +70,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: ${{ matrix.node }}
+          node-version: 24
       - uses: flatt-security/setup-takumi-guard-npm@14f07d0cbc739b42a1b7c70a04c2b84cd1318ddd # v1.4.0
       - name: Check that the guard is in the path
         run: node scripts/verify-guard.mjs
@@ -76,4 +78,7 @@ jobs:
         run: node scripts/check-lockfile.mjs
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run build
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
       - run: npm run smoke
