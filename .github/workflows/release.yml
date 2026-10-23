@@ -110,4 +110,5 @@ jobs:
         run: |
           TAG=latest
           case "$GITHUB_REF_NAME" in *-*) TAG=next ;; esac # a pre-release must not become "latest"
-          npm stage publish "package/$TARBALL" --tag "$TAG" --provenance
+          # "./" is needed: npm reads "package/x.tgz" as the GitHub repository package/x.tgz and tries to clone it
+          npm stage publish "./package/$TARBALL" --tag "$TAG" --provenance

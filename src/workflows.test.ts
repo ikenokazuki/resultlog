@@ -33,6 +33,10 @@ function problems(file: string, text: string): string[] {
   for (const line of text.split("\n")) {
     if (!line.trim().startsWith("#") && /\bnpm publish\b/.test(line)) found.push(`${file}: "${line.trim()}" (releases are staged, never published directly)`);
   }
+  // npm reads "package/x.tgz" as the GitHub repository package/x.tgz and clones it instead of reading the file: a path starts with ./
+  for (const [, spec] of text.matchAll(/\bnpm stage publish\s+"?([^\s"]+)/g)) {
+    if (!/^(\.|~\/|\/)/.test(spec as string)) found.push(`${file}: npm stage publish ${spec} (npm reads a/b as a GitHub repository: a path starts with ./)`);
+  }
   for (const [job, body] of jobsOf(text)) {
     const at = `${file} / ${job}`;
     if (!/^ {4}permissions:/m.test(body)) found.push(`${at}: no permissions of its own`);
@@ -66,7 +70,8 @@ describe("the workflows", () => {
     expect(problems("x", ci.replace(/^permissions: \{\}\n/m, "")).join()).toContain("no permissions at the top");
     expect(problems("x", ci.replace("        run: node scripts/verify-guard.mjs\n", "        run: echo skipped\n")).join()).toContain("npm ci without Takumi Guard");
     expect(problems("x", ci.replaceAll("        run: node scripts/check-lockfile.mjs\n", "        run: echo skipped\n")).join()).toContain("npm ci without Takumi Guard");
-    expect(problems("x", release.replace('npm stage publish "package/$TARBALL"', 'npm publish "package/$TARBALL"')).join()).toContain("never published directly");
+    expect(problems("x", release.replace('npm stage publish "./package/$TARBALL"', 'npm publish "./package/$TARBALL"')).join()).toContain("never published directly");
+    expect(problems("x", release.replace('npm stage publish "./package/$TARBALL"', 'npm stage publish "package/$TARBALL"')).join()).toContain("reads a/b as a GitHub repository");
     expect(problems("x", release.replace(/(  stage:[\s\S]*?steps:\n)/, "$1      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n")).join()).toContain("id-token permission and runs repository code");
     expect(problems("x", release.replace("NPM_CONFIG_REGISTRY: https://npm.flatt.tech/", "NPM_CONFIG_REGISTRY: https://registry.npmjs.org/")).join()).toContain("does not go through Takumi Guard");
   });
