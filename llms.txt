@@ -1,0 +1,88 @@
+# resultlog
+
+> Firebase Functions (v2) + neverthrow. A handler returns a Result; resultlog writes ONE structured log entry for the invocation (a "wide event") and answers the caller. It also guards the invocation: retries that never stack, a timeout guard, duplicate-event protection, secret redaction, an audit trail, and LLM call accounting.
+
+Entry points: `resultlog` (server side), `resultlog/client` (for the app: no server-side imports), `resultlog/testing`, `resultlog/digest`, `resultlog/monitoring`; commands `resultlog digest` and `resultlog monitoring`.
+Needs: Node >= 20, firebase-functions >= 6 (v2 API), firebase-admin, neverthrow ^8; zod ^4 is optional (types of schemas only).
+
+## Rules for code that uses resultlog
+
+1. A handler returns a neverthrow `Result`, `ResultAsync` or `Promise<Result>` whose error is an `AppError`. Never `err("text")` or `err({ type })`: they carry no stack. Expected failures are returned, not thrown. A thrown exception is caught and logged as ERROR `internal` (a thrown `HttpsError` keeps its code).
+2. Do not log inside a handler with console.log or firebase-functions/logger. Add facts to the one entry with `logContext`.
+3. Define errors as named classes:
+   `class UserNotFound extends defineError("UserNotFound", { code: "not-found", publicMessage: "User not found." }) {}`
+   `new UserNotFound("internal message", { cause, context, details })`
+   `message` goes to the logs only. `publicMessage` is what the client sees (default: the status name, e.g. "NOT_FOUND"). `details` reaches the client for WARNING errors only, so never put secrets in it.
+4. Severity defaults to ERROR when the code maps to HTTP 5xx (internal, unknown, data-loss, unimplemented, unavailable, deadline-exceeded), WARNING otherwise. ERROR goes to Cloud Error Reporting. `retryable` (default: severity is not WARNING) decides whether `wrapEvent` rethrows, so that the platform retries the event.
+5. Wrap the handler, then pass it to the trigger:
+   `onCall(wrapCall(schema?, fn, { timeoutSeconds? }))`
+   `onRequest(wrapRequest(schema?, fn))`
+   `onMessagePublished("topic", wrapEvent((event: CloudEvent<MessagePublishedData>) => ..., { maxEventAgeMs?, idempotency?, leaseMs? }))`
+   `beforeUserSignedIn(wrapBlocking(fn, { failOpen? }))` and `beforeUserCreated(wrapBlocking(fn))` (Identity Platform blocking functions; fn returns what Firebase accepts, or an `AppError` to deny)
+   With a zod schema, `request.data` / `req.body` is parsed and typed; invalid input becomes `InvalidInput` (invalid-argument, with `details.issues`) and `fn` is not called. Declare optional fields with `.nullish()`, not `.optional()`: Firebase clients send undefined as null.
+6. Facts: `logContext.set(attrs)` (into the entry); `.debug(message, data)` (a breadcrumb, written only if the invocation fails); `.error(err, data)` (an error you recovered from); `.audit(event, data)` (written at once, with the actor; use OWASP names such as authz_change); `.security(event, data, { severity? })` (a security event, written at once with the actor, for something that deserves a trail but does not fail, such as sensitive_read); `.setActor(fields)`; `.llm(response | stream)`; `.signal` (an AbortSignal that aborts when the timeout guard fires: pass it to fetch and SDK calls).
+7. Calling another service: `ResultAsync.fromPromise(call(), (e) => toExternalError("provider", e))`. It classifies timeouts, network errors, 429, 5xx, other 4xx and gRPC codes into code, severity and `retryable`, and keeps status, request id and Retry-After. Provider-specific cases go into its third argument, `classify`. To try another provider: `fallback(() => a(), () => b())` moves on only when the failure is `retryable`.
+8. `retry(() => call(), { attempts, baseDelayMs, maxDelayMs, budgetMs })` only for idempotent calls. It never stacks on retries inside the call: for `toExternalError("stripe" | "openai" | "anthropic", ...)` it is a type error unless the SDK's own retries are 0 and you pass `{ sdkRetriesDisabled: true }`; for any other call it detects, at run time, one attempt that sent the same HTTP request twice, stops, and throws under tests and the emulator. Extend the type-level list: `declare module "resultlog" { interface SelfRetryingProviders { gemini: true } }`.
+9. LLM calls: `logContext.llm(response)` reads tokens, model and finish reason by what the keys say, with no table of providers. Numbers are as the provider reports them. Cost comes from your function: `configure({ price: ({ model, inputTokens, outputTokens }) => number | undefined })`. Streams: `for await (const chunk of logContext.llm(stream))`.
+10. Never put secrets or personal data in attributes, messages or `details`. Redaction exists (by key: password, secret, token, authorization, cookie, api key; by pattern: JWT, Bearer tokens, API keys, private keys, card numbers, secrets in URL queries) but it is not data-loss prevention. Token counts such as max_tokens or inputTokens are not secrets.
+11. Tests: `captureLogs()`, `callableRequest()`, `httpExchange()`, `cloudEvent()` and `authBlockingEvent()` from `resultlog/testing`.
+12. Unauthorized access: to record an attempt while telling the client nothing (a request for someone else's order gets `not-found`), declare `securityEvent` on the error: `defineError("OrderNotFound", { code: "not-found", securityEvent: "authz_fail" })`. permission-denied and unauthenticated are `authz_fail` already, zod rejections are `input_validation_fail`, a replayed App Check token is `authn_token_reuse` (needs `consumeAppCheckToken: true` on the callable; recorded, not refused). Record one event one way (declared on the error, or `logContext.security`), not both. Firebase never shows your functions a failed sign-in; `wrapBlocking` sees the ones that succeed.
+
+## Configuration (once, at startup)
+
+`configure({ timeoutSeconds, timeoutMarginMs, successSampleRate, slowMs, recordExternalCalls, secretPatterns, price, sink, actor })`
+- `timeoutSeconds`: your functions' timeout. The platform doesn't expose it, so say it here as well as in `setGlobalOptions`. Turns on the timeout guard (the invocation is cut off `timeoutMarginMs` early, with a complete entry and `deadline-exceeded`).
+- `successSampleRate` (0-1): share of fast successes that are logged. Failures, slow runs, audits, handled errors, duplicates, cold starts and cut-off LLM calls are always logged. Sampled entries carry `sampleRate`.
+- `sink`: receives every entry instead of the platform logger.
+- `actor`: "security" (default) puts the actor on audit and security entries only; "all" puts it on every entry (100-250 bytes each, and personal data in every entry), which the digest's per-account and per-address rules need to see ordinary traffic.
+
+## What each wrapper does
+
+- `wrapCall`: Ok -> the value. Err -> `HttpsError(code, publicMessage, details)`; `details` = `{ reason: <error name>, ...details }` for WARNING errors, nothing for ERROR.
+- `wrapRequest`: Ok -> 200 JSON. Err -> the HTTP status of the code and `{ error: { status, message, details } }`. Does nothing more if the handler already answered.
+- `wrapEvent`: a `retryable` error is rethrown (the platform retries); anything else is acknowledged. `idempotency: firestoreIdempotency(getFirestore())` skips events that were processed already.
+- `wrapBlocking`: Ok -> the value goes back to Firebase and an audit event `authn_login_success` (`user_created` for a sign-up) is written with the address, user agent and method. Err -> `HttpsError`, and the security event `authn_login_fail` unless the error names its own. A broken policy denies the sign-in unless `failOpen: true`. The timeout guard defaults to 7 s, the platform's limit.
+
+## Log entry fields
+
+Every entry has `severity` and `message`. INFO = success (message `<K_SERVICE> ok <ms> ms`), WARNING = expected failure (message = the error's message), ERROR/CRITICAL = server failure (message is the stack; `@type` makes Error Reporting pick it up), NOTICE = audit.
+
+- Who/what: `authUid` (callable), `eventId` and `eventType` (events), `durationMs`, `coldStart: true` (first invocation of an instance).
+- Request (callable and HTTP function entries, not events): `httpRequest` { requestMethod, requestUrl (path only), status (what the client got), latency ("0.042s"), remoteIp and userAgent only where `actor` is shown } is Cloud Logging's own field, so `httpRequest.status>=500` works in Logs Explorer. ERROR and CRITICAL entries also have Error Reporting's `context` { user (uid), httpRequest { method, url, responseStatusCode, userAgent, remoteIp } }.
+- Failure: `errorName`, `errorCode` (Firebase code), `fingerprint` (12 hex characters naming the kind of failure: name, code, where it was raised, and for upstream failures provider + status class), `publicMessage`, `retryable`, `breadcrumbs` [{ timestamp, level, message, data }], `cause` (original error with stack), plus the error's `context` fields at top level.
+- `handledErrors`: [{ ...data, error }] errors that were recovered from (`fallback: <index>` for an attempt left by `fallback`).
+- `retries`: [{ attempts, waitedMs, outcome, stoppedBy?, repeatedRequest? }]; `stoppedBy` is one of attempts, budget, timeout, retry-after, not-retryable, internal-retry.
+- `external`: { "<host>": { calls, statuses: { "200": n }, errors?, pending?, totalMs, maxMs } } for the HTTP calls made (time until the response headers; hosts only, never paths or queries; gRPC is not seen).
+- `provider`, `upstream` { status, code, type, requestId, retryAfterMs } for upstream failures.
+- `llm`: { calls, inputTokens, outputTokens, totalTokens, cachedTokens, cacheWriteTokens, reasoningTokens, models: { name: { calls, inputTokens, outputTokens } }, finishReasons, truncated, blocked, interrupted, unrecognized, ttftMs, cost }; zero values are left out.
+- Security and audit: `securityEvent` (OWASP Logging Vocabulary names such as "authz_fail", "input_validation_fail", "authn_token_reuse", "authn_login_fail"; on a failed invocation, or on an immediate entry from `logContext.security`), `securityEvents` (the final entry's pointer to the immediate ones), `auditEvent` (the immediate entry) and `auditEvents` (listed again in the final entry), `actor` { uid, signInProvider, authTime, appId, appCheck ("verified" | "missing" | "replayed"), ip, forwardedFor, userAgent, locale } (on these entries, or on every entry with `actor: "all"`). Labels: `logging.googleapis.com/labels` = { audit: "true" } or { security: "<event>" }.
+- `duplicate: true`: an event that was skipped as already processed. `sampleRate`: this success stands for 1 / sampleRate invocations. `truncatedBytes`: the entry was over 100 KB and was cut down to its key fields.
+
+## Recipes
+
+A callable with validation, a typed result and a recoverable lookup:
+
+    const getUser = onCall(
+      wrapCall(z.object({ id: z.string() }), (request) =>
+        ResultAsync.fromPromise(db.doc(`users/${request.data.id}`).get(), (cause) => new DbError("read failed", { cause }))
+          .andThen((snap) => (snap.exists ? ok(snap.data()) : err(new UserNotFound(`users/${request.data.id} missing`))))
+          .andTee((user) => logContext.set({ plan: user.plan })),
+      ),
+    );
+
+An event handled once:
+
+    onMessagePublished("orders", wrapEvent((event: CloudEvent<MessagePublishedData>) => handle(event), { idempotency: firestoreIdempotency(getFirestore()) }));
+
+Cloud Monitoring: `npx resultlog monitoring --project PROJECT [--service a,b] [--notification-channel projects/PROJECT/notificationChannels/ID] [--threshold errors=10]` writes 9 log-based metrics (counters labelled by event, error name and severity only), 6 alert policies, a dashboard and a README into ./monitoring. It only writes files and never talks to Google Cloud; the README gives the gcloud commands that apply them (`gcloud logging metrics create`, `gcloud monitoring policies create`, `gcloud monitoring dashboards create`), which the user runs. By hand, the README's "By hand, in the console" section has ready filters for Logs Explorer's Actions > Create log alert (for example `resource.type="cloud_run_revision" AND httpRequest.status>=500`) and the summary fields to add (`jsonPayload.errorName`, `durationMs`, `authUid`, `securityEvent`). Never add a label that holds a uid, an address or any id: per-actor questions go to the digest.
+
+Investigating: `gcloud logging read 'resource.type="cloud_run_revision"' --freshness=1d --format=json | npx resultlog digest --pseudonymize`. The digest's `findings` come from rules (authz-probing, validation-fuzzing, many-accounts-one-ip, many-ips-one-account, mass-access, token-reuse, privilege-change, privilege-change-by-non-admin); change a threshold with `--threshold rule=N`, name admins with `--admins`, add rules through `digest(logs, { rules })`.
+
+## Do not
+
+- Do not throw for expected failures; return `err(new SomeError(...))`.
+- Do not wrap Stripe, OpenAI or Anthropic calls in `retry()` while their SDK retries (set its retries to 0 first).
+- Do not set the timeout only in `setGlobalOptions`: resultlog needs `configure({ timeoutSeconds })` too.
+- Do not add tables of providers, models or prices; pass a `price` function.
+- Do not read `request.data` without a schema unless you validate it yourself: it is `unknown`.
+- Do not put user ids or IP addresses into log-based metric labels: count by event, and find the actor with the digest or a log query.

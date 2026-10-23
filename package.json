@@ -1,0 +1,148 @@
+{
+  "name": "resultlog",
+  "version": "0.1.0",
+  "license": "MIT",
+  "author": "ikenokazuki",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ikenokazuki/resultlog.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ikenokazuki/resultlog/issues"
+  },
+  "description": "One record per Firebase Function invocation: neverthrow Results, errors that keep their stack, audit trail, retries that never stack, timeout guard, duplicate-event protection, LLM call accounting.",
+  "keywords": [
+    "firebase",
+    "cloud-functions",
+    "neverthrow",
+    "result",
+    "logging",
+    "structured-logging",
+    "wide-events",
+    "error-reporting",
+    "audit",
+    "retry",
+    "idempotency",
+    "llm",
+    "openai",
+    "anthropic",
+    "gemini",
+    "observability",
+    "cloud-monitoring",
+    "alerting"
+  ],
+  "type": "module",
+  "main": "./dist/cjs/index.js",
+  "types": "./dist/cjs/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/esm/index.d.ts",
+        "default": "./dist/esm/index.js"
+      },
+      "require": {
+        "types": "./dist/cjs/index.d.ts",
+        "default": "./dist/cjs/index.js"
+      }
+    },
+    "./client": {
+      "import": {
+        "types": "./dist/esm/client.d.ts",
+        "default": "./dist/esm/client.js"
+      },
+      "require": {
+        "types": "./dist/cjs/client.d.ts",
+        "default": "./dist/cjs/client.js"
+      }
+    },
+    "./testing": {
+      "import": {
+        "types": "./dist/esm/testing.d.ts",
+        "default": "./dist/esm/testing.js"
+      },
+      "require": {
+        "types": "./dist/cjs/testing.d.ts",
+        "default": "./dist/cjs/testing.js"
+      }
+    },
+    "./digest": {
+      "import": {
+        "types": "./dist/esm/digest.d.ts",
+        "default": "./dist/esm/digest.js"
+      },
+      "require": {
+        "types": "./dist/cjs/digest.d.ts",
+        "default": "./dist/cjs/digest.js"
+      }
+    },
+    "./monitoring": {
+      "import": {
+        "types": "./dist/esm/monitoring.d.ts",
+        "default": "./dist/esm/monitoring.js"
+      },
+      "require": {
+        "types": "./dist/cjs/monitoring.d.ts",
+        "default": "./dist/cjs/monitoring.js"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "typesVersions": {
+    "*": {
+      "client": [
+        "dist/cjs/client.d.ts"
+      ],
+      "testing": [
+        "dist/cjs/testing.d.ts"
+      ],
+      "digest": [
+        "dist/cjs/digest.d.ts"
+      ],
+      "monitoring": [
+        "dist/cjs/monitoring.d.ts"
+      ]
+    }
+  },
+  "bin": {
+    "resultlog": "dist/esm/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "README.ja.md",
+    "LICENSE",
+    "llms.txt"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "prepack": "node scripts/build.mjs",
+    "prepublishOnly": "node scripts/publish-guard.mjs",
+    "smoke": "node scripts/smoke.mjs",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "firebase-admin": ">=11.10.0",
+    "firebase-functions": ">=6.0.0",
+    "neverthrow": "^8.0.0",
+    "zod": "^4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "zod": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.3",
+    "@types/node": "^26.6.5",
+    "firebase-admin": "^14.5.0",
+    "firebase-functions": "^7.4.0",
+    "neverthrow": "^8.2.0",
+    "typescript": "^7.0.2",
+    "zod": "^4.6.7"
+  }
+}

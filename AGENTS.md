@@ -1,0 +1,54 @@
+# AGENTS.md
+
+resultlog is a TypeScript library for Firebase Functions (v2) built on neverthrow: one structured log entry per invocation, plus guard rails (retries that never stack, a timeout guard, duplicate-event protection, redaction, an audit trail, LLM call accounting). `README.md` says what it does, and `llms.txt` has the rules for using it and the dictionary of log fields.
+
+## Layout (`src/`, one module per concern)
+
+- `index.ts`: the public API, re-exports only.
+- `errors.ts`: `AppError`, `defineError`, and the library's own errors. `external.ts`: `toExternalError`, the classification of upstream failures.
+- `options.ts`: `configure()` and the settings. `state.ts` and `context.ts`: the per-invocation store (AsyncLocalStorage) and `logContext`.
+- `output.ts`: redaction, sanitizing, size caps, delivery to the sink. `fingerprint.ts`: the id of a kind of failure.
+- `core.ts`: `settle()` runs a handler, applies the timeout guard and writes its one entry.
+- `calls.ts`: watches outgoing HTTP through `diagnostics_channel` (per-host summary, repeated-request detection). `retry.ts`: `retry()` and `fallback()`. `llm.ts`: reads usage from any LLM response.
+- `adapters.ts`: `wrapCall`, `wrapRequest`, `wrapEvent`. `idempotency.ts`: `firestoreIdempotency`.
+- Separate entry points: `client.ts` (browser-safe: it must not import anything from the server side), `testing.ts`, `digest.ts` (reports and the detection rules), `monitoring.ts` (Cloud Monitoring metrics, alert policies, dashboard and the README that says which gcloud commands apply them, as pure functions that only produce files), `cli.ts` (the `resultlog` command: `digest` and `monitoring`).
+
+## Commands
+
+    npm ci                      # install from package-lock.json (npm's lockfile; Bun only runs the tests)
+    bun test                    # all tests; src/*.test.ts
+    npx tsc --noEmit            # typecheck, tests included
+    npm run build               # dist/esm and dist/cjs (what `npm pack` ships)
+    npm run smoke               # the build, on the Node that runs it (CI does it on Node 20, 22, 24 and 26)
+    npm pack --dry-run
+
+## Conventions
+
+- Test first. Write the test, watch it fail for the right reason, then implement. A bug gets a test that reproduces it before it gets a fix.
+- Imports between modules end in `.js` (`./errors.js`), so that the build runs on Node as it is.
+- `src/` must not use Bun-only APIs: production runs on Node 20 or later. Bun drops a `diagnostics_channel` subscription once its channel object is garbage-collected, so those objects are kept referenced (`watchedChannels` in `calls.ts`).
+- No lookup tables of providers, models, prices or error names. Read structure instead: key names, status codes, run-time behaviour. Where a list can't be avoided, make it extendable (`SelfRetryingProviders`) or supplied by the user (`price`). Say plainly in the docs what the generic rule can't see.
+- `monitoring.ts` never talks to Google Cloud, and writes no script that does: applying the files is the user's gcloud commands, listed in the README it generates (`monitoring.test.ts` runs that block against a stub `gcloud`). Its filters and labels are tested against entries the library really writes (`monitoring.test.ts` has a small reader for the Logging query language: when you add a field to the entries that a metric needs, extend the metric and that test). Metric labels must stay low-cardinality: never a uid, an address or any id. The console recipes in the README (the filters under "By hand, in the console") are tested the same way, and the Japanese README must give the same filters: a new recipe needs a line in `meant` in `monitoring.test.ts`.
+- What Cloud Logging and Error Reporting read from an entry (`httpRequest`, `logging.googleapis.com/labels`, the `context` of an ERROR) is built in `core.ts` and sanitized like any other field. The address and user agent in them follow the actor rule (only where the actor is shown), and `remoteIp` only if `isIP` accepts it, because a forged X-Forwarded-For can make `req.ip` anything. `requestUrl` is the path without the query string.
+- Installs go through Takumi Guard (https://shisho.dev/docs/ja/t/guard/quickstart/npm/): in CI, `flatt-security/setup-takumi-guard-npm` in anonymous mode, then `scripts/verify-guard.mjs` (the quickstart's blocked package must be refused with a 403) and `scripts/check-lockfile.mjs` (every lockfile entry comes from registry.npmjs.org or the guard: npm sends both to the guard first, but a git or tarball URL would go past it), then `npm ci --ignore-scripts`. The guard is read-only: never publish through it. `workflows.test.ts` holds the rules for `.github/workflows`: every action is pinned to a commit SHA, permissions are declared (only the `stage` job has `id-token: write`, and it runs no repository code), no install without the guard, no direct `npm publish`.
+- Logging must never break the code being logged: diagnostics subscribers, sinks and price functions are wrapped so that a failure in them is swallowed.
+- Secrets are never logged. Token counts (`max_tokens`, `inputTokens`) are not secrets, tokens are.
+- Comments are in English and explain why, not what.
+- `README.md` (English) and `README.ja.md` (Japanese) stay in step, in plain prose. Their code examples are type-checked by compiling them in a throwaway file under `src/`, which is deleted afterwards.
+- What depends on the real SDKs or the real runtime is checked by hand, because the unit tests fake it: smoke tests with real axios, Stripe and OpenAI SDKs against a local server, on Node 20, 22 and the current one, and the Functions emulator (`firebase emulators:start --only functions`). There is no Java here, so the Firestore emulator can't run.
+
+## Publishing
+
+The license is MIT (`LICENSE`, and the `license` field of `package.json`), with "resultlog contributors" as the holder. The repository is github.com/ikenokazuki/resultlog.
+
+A release is made by `.github/workflows/release.yml`: push a tag `vX.Y.Z` that is the version in `package.json` and is on `main`. The `build` job installs through the guard, runs the tests, builds and packs; the `stage` job (environment `npm`, the only job with `id-token: write`) takes that tarball, checks its checksum and runs `npm stage publish` with provenance, using the short-lived OIDC credential of a trusted publisher (there is no npm token in the repository). Nothing is public until a maintainer approves the staged version with 2FA, on npmjs.com or with `npm stage approve <stage-id>`. Run by hand (`workflow_dispatch`), the workflow only builds and tests. To release: `npm version patch` (or minor, major), `git push --follow-tags`, approve.
+
+Set up once, by the owner, because a trusted publisher can only be added to a package that exists:
+
+1. Publish the first version by hand. `ALLOW_LOCAL_PUBLISH=1 npm publish --registry https://registry.npmjs.org/`. Without the flag `scripts/publish-guard.mjs` refuses (releases are made in CI), and the registry is named because a default registry of Takumi Guard is read-only.
+2. `npm trust github resultlog --file release.yml --repo ikenokazuki/resultlog --env npm --allow-stage-publish` (npm 11.15 or later, 2FA on). Stage only: the workflow can stage but never publish. The workflow file name, the repository and the environment name are case-sensitive and must match `release.yml`, the GitHub repository and `environment: npm`.
+3. In the package settings on npmjs.com, "Require two-factor authentication and disallow tokens".
+
+Rehearse a publish without touching npm. Run a local registry (`npm install verdaccio@6` in a scratch directory, `verdaccio --config config.yaml --listen 127.0.0.1:4873`, with an uplink to npmjs so that the peers resolve, and `resultlog` served from it only). Give every npm command a scratch `--userconfig` and `--globalconfig` that hold only `registry=http://127.0.0.1:4873/` and a throwaway token, and `--cache` too for `npx`: then your own `~/.npmrc` token is never read and nothing can reach npmjs. Write the flags out in every command, or put `NPM_CONFIG_REGISTRY=... NPM_CONFIG_USERCONFIG=... NPM_CONFIG_GLOBALCONFIG=...` in front of it, and run `npm config get registry` with the same settings first: a shell variable that holds the flags is not word-split in zsh, so they are silently dropped and the command goes to the registry in your own `~/.npmrc`, with your token (this happened once; that publish was refused with a 405). Copy the repo and `ALLOW_LOCAL_PUBLISH=1 npm publish` the copy to the local registry (`npm publish --dry-run` runs the guard too), then install it into fresh projects: ESM and CJS, `npx resultlog`, a global install, TypeScript 7 (nodenext, bundler) and 5.9 (`moduleResolution: node`), and the lowest peers (`firebase-admin@11.10.0 firebase-functions@6.0.0 neverthrow@8.0.0 zod@4.0.0`, where the suite itself is run). What it found, so that it stays fixed: a `bin` path that starts with `./` is rewritten by npm with a warning that says the script was removed (`package.test.ts` guards it), and a README example that has imports should have all of them.
+
+Not verified against a real GCP project: the mapping of `logging.googleapis.com/labels`, pickup by Error Reporting and what it shows from `context`, how Logs Explorer summarizes an entry with `httpRequest`, billing of excluded logs, and the Firestore idempotency store with real transactions.
