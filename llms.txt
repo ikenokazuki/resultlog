@@ -30,10 +30,11 @@ Needs: Node >= 22, firebase-functions >= 6 (v2 API) and firebase-admin (peers; a
 
 ## Configuration (once, at startup)
 
-`configure({ timeoutSeconds, timeoutMarginMs, successSampleRate, slowMs, recordExternalCalls, secretPatterns, price, sink, actor })`
+`configure({ timeoutSeconds, timeoutMarginMs, successSampleRate, slowMs, recordExternalCalls, secretPatterns, price, sink, actor, proxyHops })`
 - `timeoutSeconds`: your functions' timeout. The platform doesn't expose it, so say it here as well as in `setGlobalOptions`. Turns on the timeout guard (the invocation is cut off `timeoutMarginMs` early, with a complete entry and `deadline-exceeded`).
 - `successSampleRate` (0-1): share of fast successes that are logged. Failures, slow runs, audits, handled errors, retries, duplicates, cold starts and cut-off LLM calls are always logged. Sampled entries carry `sampleRate`.
 - `sink`: receives every entry instead of the platform logger.
+- `proxyHops` (default 1): how many proxies sit in front of the function, Google's front end included. `actor.ip` is the `X-Forwarded-For` entry that many places from the right, because the left-most one (Express's `req.ip`) is whatever the client wrote and a client that changes it escapes every per-address rule. `actor.forwardedFor` keeps the raw header. Behind Firebase Hosting or another CDN raise it: count the entries from the client's address to the end of `forwardedFor`, the client's own included.
 - `actor`: "security" (default) puts the actor on audit and security entries only; "all" puts it on every entry (100-250 bytes each, and personal data in every entry), which the digest's per-account and per-address rules need to see ordinary traffic.
 
 ## What each wrapper does
@@ -55,7 +56,7 @@ Every entry has `severity` and `message`. INFO = success (message `<K_SERVICE> o
 - `external`: { "<host>": { calls, statuses: { "200": n }, errors?, pending?, totalMs, maxMs } } for the HTTP calls made (time until the response headers; hosts only, never paths or queries; gRPC is not seen).
 - `provider`, `upstream` { status, code, type, requestId, retryAfterMs } for upstream failures.
 - `llm`: { calls, inputTokens, outputTokens, totalTokens, cachedTokens, cacheWriteTokens, reasoningTokens, models: { name: { calls, inputTokens, outputTokens } }, finishReasons, truncated, blocked, interrupted, unrecognized, ttftMs, cost }; zero values are left out.
-- Security and audit: `securityEvent` (OWASP Logging Vocabulary names such as "authz_fail", "input_validation_fail", "authn_token_reuse", "authn_login_fail"; on a failed invocation, or on an immediate entry from `logContext.security`), `securityEvents` (the final entry's pointer to the immediate ones), `auditEvent` (the immediate entry) and `auditEvents` (listed again in the final entry), `actor` { uid, signInProvider, authTime, appId, appCheck ("verified" | "missing" | "replayed"), ip, forwardedFor, userAgent, locale } (on these entries, or on every entry with `actor: "all"`). Labels: `logging.googleapis.com/labels` = { audit: "true" } or { security: "<event>" }.
+- Security and audit: `securityEvent` (OWASP Logging Vocabulary names such as "authz_fail", "input_validation_fail", "authn_token_reuse", "authn_login_fail"; on a failed invocation, or on an immediate entry from `logContext.security`), `securityEvents` (the final entry's pointer to the immediate ones), `auditEvent` (the immediate entry) and `auditEvents` (listed again in the final entry), `actor` { uid, signInProvider, authTime, appId, appCheck ("verified" | "missing" | "replayed"), ip (the address your trusted proxies saw: see proxyHops), forwardedFor (the raw header), userAgent, locale } (on these entries, or on every entry with `actor: "all"`). Labels: `logging.googleapis.com/labels` = { audit: "true" } or { security: "<event>" }.
 - `duplicate: true`: an event that was skipped as already processed. `sampleRate`: this success stands for 1 / sampleRate invocations. `truncatedBytes`: the entry was over 100 KB and was cut down to its key fields.
 
 ## Recipes
