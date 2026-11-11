@@ -122,6 +122,7 @@
     "prepack": "node scripts/build.mjs",
     "prepublishOnly": "node scripts/publish-guard.mjs",
     "smoke": "node scripts/smoke.mjs",
+    "emulator": "node scripts/emulator-check.mjs",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
