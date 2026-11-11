@@ -59,6 +59,7 @@ beforeEach(() => {
     price: undefined,
     sink: undefined,
     actor: "security",
+    proxyHops: 1,
   });
 });
 
@@ -609,6 +610,69 @@ describe("sampling", () => {
       random.mockRestore();
     }
     expect(writes[0].sampleRate).toBe(0.5);
+  });
+});
+
+// Express's req.ip is the left-most X-Forwarded-For entry, because the Functions Framework trusts every proxy
+// (`app.enable('trust proxy')`), and that entry is whatever the client wrote. The entries that Google's front end appends
+// are on the right. Seen in the real Functions emulator: a client that sent "192.0.2.99, 203.0.113.9" was "192.0.2.99".
+describe("the client address", () => {
+  const Refused = defineError("Refused", { code: "permission-denied" });
+  /** `ip` is what Express makes of the request: with trust proxy on, the left-most X-Forwarded-For entry. */
+  const request = (headers: Record<string, string>, ip = headers["x-forwarded-for"]?.split(",")[0]?.trim() ?? "198.51.100.4") =>
+    ({ data: {}, rawRequest: { ip, headers: { "user-agent": "curl/8.0", ...headers } } }) as unknown as CallableRequest;
+  /** The entry that a refused call writes: it carries the actor. */
+  const refused = async (req: CallableRequest) => {
+    await wrapCall(() => errAsync(new Refused("no")))(req).catch(() => {});
+    return writes[0];
+  };
+
+  test("is the entry the trusted proxy appended, not the one the client wrote first", async () => {
+    const entry = await refused(request({ "x-forwarded-for": "192.0.2.99, 203.0.113.9" }));
+    expect(entry.actor).toMatchObject({ ip: "203.0.113.9", forwardedFor: "192.0.2.99, 203.0.113.9" }); // the raw header stays
+    expect(entry.httpRequest.remoteIp).toBe("203.0.113.9");
+  });
+
+  test("proxyHops counts the proxies in front, so that a CDN's address is skipped as well", async () => {
+    configure({ proxyHops: 2 });
+    const entry = await refused(request({ "x-forwarded-for": "198.51.100.7, 192.0.2.88, 203.0.113.9" }));
+    expect(entry.actor.ip).toBe("192.0.2.88");
+  });
+
+  test("a header shorter than proxyHops gives its first entry, as Express's trust proxy does", async () => {
+    configure({ proxyHops: 3 });
+    expect((await refused(request({ "x-forwarded-for": "198.51.100.7, 203.0.113.9" }))).actor.ip).toBe("198.51.100.7");
+  });
+
+  test.each([
+    ["a port after an IPv4 address", "203.0.113.9:4711", "203.0.113.9"],
+    ["an IPv6 address in brackets with a port", "[2001:db8::1]:443", "2001:db8::1"],
+    ["an IPv6 address", "2001:db8::1", "2001:db8::1"],
+    ["spaces around the entry", "192.0.2.99 ,   203.0.113.9  ", "203.0.113.9"],
+  ])("reads %s", async (_name, header, expected) => {
+    expect((await refused(request({ "x-forwarded-for": header }))).actor.ip).toBe(expected);
+  });
+
+  test("an entry that is no address leaves the address out: it does not fall back to what the client wrote", async () => {
+    const entry = await refused(request({ "x-forwarded-for": "192.0.2.99, unknown" }));
+    expect(entry.actor.ip).toBeUndefined();
+    expect(entry.actor.forwardedFor).toBe("192.0.2.99, unknown");
+    expect(entry.httpRequest.remoteIp).toBeUndefined();
+  });
+
+  test("without X-Forwarded-For it is the address of the connection", async () => {
+    expect((await refused(request({}, "198.51.100.4"))).actor.ip).toBe("198.51.100.4");
+  });
+
+  test.each([0, -1, 1.5, Number.NaN, undefined])("proxyHops %p means 1", async (hops) => {
+    configure({ proxyHops: hops });
+    expect((await refused(request({ "x-forwarded-for": "192.0.2.99, 203.0.113.9" }))).actor.ip).toBe("203.0.113.9");
+  });
+
+  test("an HTTP function follows the same rule", async () => {
+    const { req, res } = httpExchange({ headers: { "x-forwarded-for": "192.0.2.99, 203.0.113.9" } });
+    await wrapRequest(() => errAsync(new Refused("no")))(req, res);
+    expect(writes[0].actor).toMatchObject({ ip: "203.0.113.9", forwardedFor: "192.0.2.99, 203.0.113.9" });
   });
 });
 
@@ -2051,7 +2115,8 @@ describe("actor on every entry", () => {
     const { req, res } = httpExchange({ headers: { "x-forwarded-for": "198.51.100.1" } });
     await wrapRequest(() => okAsync(1))(req, res);
     await wrapEvent(() => okAsync(undefined))(cloudEvent({}, { id: "e1" }));
-    expect(writes[0].actor).toMatchObject({ ip: "127.0.0.1", forwardedFor: "198.51.100.1", userAgent: "test" });
+    // The proxy in front wrote the one entry, so that is the client; the connection (127.0.0.1) is the proxy itself.
+    expect(writes[0].actor).toMatchObject({ ip: "198.51.100.1", forwardedFor: "198.51.100.1", userAgent: "test" });
     expect(writes[1].actor).toBeUndefined(); // nobody made an event
   });
 });

@@ -30,6 +30,15 @@ export interface LogOptions {
    */
   actor?: "security" | "all";
   /**
+   * How many proxies sit between the client and your function, counting the one that connects to it. Google's front end
+   * is one, and that is the default. `actor.ip` is the address that many places from the right in `X-Forwarded-For`:
+   * Express's `req.ip` is the left-most entry, which is whatever the client wrote, and a client that changes it on every
+   * request escapes any rule that counts per address. The meaning is that of Express's `trust proxy` set to a number.
+   * Behind Firebase Hosting or another CDN there are more: set it to the number of entries from the client's address to
+   * the end of a real entry's `forwardedFor`, the client's own included.
+   */
+  proxyHops?: number;
+  /**
    * Receives every entry instead of the platform logger: to capture entries in a test (see `captureLogs` in
    * `resultlog/testing`), or to write them somewhere else. A sink that throws is ignored.
    */
@@ -53,6 +62,7 @@ export const settings = {
   secretPatterns: [] as RegExp[],
   sink: undefined as LogOptions["sink"],
   actor: "security" as "security" | "all",
+  proxyHops: 1 as number | undefined,
 };
 
 /** Sets process-wide logging options. Call it once when the module loads. */
