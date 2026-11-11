@@ -52,8 +52,7 @@ jobs:
         run: npm pack --dry-run
 
   # The unit tests run on Bun and production runs on Node, so the built package is run on every Node it supports. It is
-  # installed and built on Node 24 everywhere: firebase-admin 14, a devDependency, needs Node 22 or later, and so does its
-  # Firestore dependency, which npm skips on Node 20 without a word (the build then fails on a type it cannot find).
+  # installed and built once, on Node 24, and the smoke test then runs on each of them.
   node:
     name: Smoke test on Node ${{ matrix.node }}
     runs-on: ubuntu-24.04
@@ -63,7 +62,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: [20, 22, 24, 26]
+        node: [22, 24, 26]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

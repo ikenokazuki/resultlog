@@ -32,6 +32,14 @@ describe("package.json, as npm will publish it", () => {
     expect(guard({ GITHUB_ACTIONS: "true" }).status).toBe(0);
   });
 
+  // A peer dependency is one the project has to install itself (yarn and pnpm do not do it for it), and a project that
+  // imports it without listing it cannot under pnpm. A dependency comes with resultlog, and resultlog re-exports it.
+  test("neverthrow is a dependency, so that installing resultlog installs it", () => {
+    expect(pkg.dependencies?.neverthrow).toMatch(/^\^8\./);
+    expect(pkg.peerDependencies?.neverthrow).toBeUndefined();
+    expect(pkg.devDependencies?.neverthrow).toBeUndefined(); // a second range in devDependencies could hide a floor that is too low
+  });
+
   test("every file it lists (other than the build output) exists", () => {
     for (const entry of pkg.files as string[]) if (entry !== "dist") expect(existsSync(join(root, entry)), entry).toBe(true);
   });

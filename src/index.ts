@@ -9,3 +9,6 @@ export { fingerprint } from "./fingerprint.js";
 export { configure, type HandlerOptions, type LogOptions } from "./options.js";
 export { fallback, retry, type RetryOptions, type SelfRetryingProviders } from "./retry.js";
 export type { Breadcrumb } from "./state.js";
+// neverthrow is a dependency of resultlog and is re-exported, so that `import { ok, err } from "resultlog"` is all a project
+// needs: one install, one import, and the same functions and classes the handlers are checked against.
+export { Err, err, errAsync, fromAsyncThrowable, fromPromise, fromSafePromise, fromThrowable, Ok, ok, okAsync, Result, ResultAsync, safeTry } from "neverthrow";

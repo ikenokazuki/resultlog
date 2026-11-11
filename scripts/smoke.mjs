@@ -20,6 +20,10 @@ for (const entry of ["", "/client", "/testing", "/digest", "/monitoring"]) {
   assert.ok(names(esm).length > 0, `resultlog${entry} exports something`);
 }
 
+// neverthrow comes with resultlog and is re-exported from it, in the ESM and the CJS build alike: the very same functions.
+assert.equal((await import("resultlog")).ok, ok, "the ESM build re-exports neverthrow's own ok");
+assert.equal(require("resultlog").okAsync, require("neverthrow").okAsync, "the CJS build re-exports neverthrow's own okAsync");
+
 const { defineError, wrapCall } = await import("resultlog");
 const { callableRequest, captureLogs } = await import("resultlog/testing");
 const logs = captureLogs();
