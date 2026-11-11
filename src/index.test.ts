@@ -168,6 +168,70 @@ describe("wrapCall", () => {
     expect(writes[0]).toMatchObject({ severity: "ERROR", errorCode: "internal", message: boom.stack });
   });
 
+  test("a thrown exception keeps its own name in the log, and the client learns nothing from it", async () => {
+    const call = wrapCall(() => {
+      throw new TypeError("x is not a function");
+    });
+    const error = (await call(callRequest()).catch((e: HttpsError) => e)) as HttpsError;
+    expect(error).toMatchObject({ code: "internal", message: "INTERNAL" });
+    expect(error.details).toBeUndefined();
+    expect(writes[0]).toMatchObject({ severity: "ERROR", errorName: "TypeError", errorCode: "internal" });
+  });
+
+  test("a plain Error returned as the error is treated like a thrown one: ERROR, internal, its own name", async () => {
+    const call = wrapCall(() => errAsync(new RangeError("page size out of range")));
+    await expect(call(callRequest())).rejects.toMatchObject({ code: "internal", message: "INTERNAL" });
+    expect(writes[0]).toMatchObject({ severity: "ERROR", errorName: "RangeError", errorCode: "internal" });
+  });
+
+  // Compile-time checks only: never run. An Error is accepted as the error of any adapter's Result; a value that is no
+  // Error carries no stack and no code, so it is not.
+  const errorTypeChecks = () => {
+    wrapCall(() => errAsync(new Error("x")));
+    wrapRequest(() => err(new Error("x")));
+    wrapEvent((_event: unknown) => errAsync(new Error("x")));
+    wrapBlocking(() => err(new Error("x")));
+    // @ts-expect-error a string carries no stack: define an error with defineError
+    wrapCall(() => err("text"));
+    // @ts-expect-error nor does a plain object
+    wrapCall(() => err({ type: "NotFound" }));
+  };
+  void errorTypeChecks;
+
+  test("a thrown exception's stack is written once: in the message, not again in the cause", async () => {
+    const boom = Object.assign(new Error("connect ECONNRESET"), { code: "ECONNRESET" });
+    boom.stack = "Error: connect ECONNRESET\n    at connect (/workspace/lib/db.js:10:5)\n    at open (/workspace/lib/db.js:20:9)";
+    await wrapCall(() => {
+      throw boom;
+    })(callRequest()).catch(() => {});
+    const frame = "at connect (/workspace/lib/db.js:10:5)";
+    expect(writes[0].message).toContain(frame);
+    expect(JSON.stringify(writes[0]).split(frame)).toHaveLength(2); // once, not twice
+    expect(writes[0].cause).toMatchObject({ name: "Error", message: "connect ECONNRESET", code: "ECONNRESET" }); // the rest of the cause stays
+    expect(writes[0].cause.stack).toBeUndefined();
+  });
+
+  test("the same holds for an error that describes itself with toJSON, as axios errors do", async () => {
+    const stack = "Error: Request failed\n    at settle (/workspace/node_modules/axios/lib/core/settle.js:19:12)";
+    const axiosLike = Object.assign(new Error("Request failed"), { toJSON: () => ({ message: "Request failed", status: 502, stack }) });
+    axiosLike.stack = stack;
+    await wrapCall(() => {
+      throw axiosLike;
+    })(callRequest()).catch(() => {});
+    expect(JSON.stringify(writes[0]).split("at settle (")).toHaveLength(2);
+    expect(writes[0].cause).toMatchObject({ message: "Request failed", status: 502 });
+  });
+
+  test("exceptions of different kinds thrown from one place are different failures", async () => {
+    const fail = (kind: "type" | "range") => {
+      throw kind === "type" ? new TypeError("bad") : new RangeError("bad");
+    };
+    await wrapCall(() => fail("type"))(callRequest()).catch(() => {});
+    await wrapCall(() => fail("range"))(callRequest()).catch(() => {});
+    expect(writes.map((w) => w.errorName)).toEqual(["TypeError", "RangeError"]);
+    expect(writes[0].fingerprint).not.toBe(writes[1].fingerprint);
+  });
+
   test("a thrown HttpsError keeps its code and details, without an unnamed reason", async () => {
     const call = wrapCall(() => {
       throw new HttpsError("permission-denied", "nope", { scope: "admin" });
@@ -525,6 +589,17 @@ describe("sampling", () => {
     expect(finals.every((w) => w.sampleRate === undefined)).toBe(true);
   });
 
+  test("a call that needed retries is always logged, even when the last attempt worked", async () => {
+    configure({ successSampleRate: 0 });
+    const state = { calls: 0 };
+    const unavailable = () => toExternalError("partner", Object.assign(new Error("HTTP 503"), { status: 503 }));
+    await wrapCall(() => retry(() => (++state.calls === 1 ? errAsync(unavailable()) : okAsync(1)), { baseDelayMs: 1 }))(callRequest());
+    expect(state.calls).toBe(2);
+    expect(writes).toHaveLength(1);
+    expect(writes[0].retries).toEqual([expect.objectContaining({ attempts: 2, outcome: "ok" })]);
+    expect(writes[0].sampleRate).toBeUndefined();
+  });
+
   test("sampled entries record their sample rate", async () => {
     configure({ successSampleRate: 0.5 });
     const random = spyOn(Math, "random").mockReturnValue(0.1);
@@ -741,9 +816,17 @@ describe("retry", () => {
     const fn = () => (++state.calls <= failures ? errAsync(unavailable()) : okAsync(`ok after ${state.calls}`));
     return { fn, state };
   };
-  /** Pretends the wrapped call issued an HTTP request, as fetch does through diagnostics_channel. */
-  const sendRequest = () =>
-    dc.channel("undici:request:create").publish({ request: { method: "POST", origin: "https://api.example.com", path: "/v1/x" } });
+  /**
+   * Pretends the wrapped call sent an HTTP request and heard back, as fetch does through diagnostics_channel: a status,
+   * an error (the connection dropped), or nothing yet.
+   */
+  const sendRequest = (answer: number | "error" | "pending" = 200, path = "/v1/x") => {
+    const request = { method: "POST", origin: "https://api.example.com", path };
+    publish("undici:request:create", { request });
+    if (answer === "pending") return;
+    if (answer === "error") publish("undici:request:error", { request, error: new Error("socket hang up") });
+    else publish("undici:request:headers", { request, response: { statusCode: answer } });
+  };
   const inProduction = async (body: () => Promise<void>) => {
     const previous = process.env.NODE_ENV;
     process.env.NODE_ENV = "production";
@@ -809,8 +892,8 @@ describe("retry", () => {
       await wrapCall(() =>
         retry(() => {
           state.calls++;
-          sendRequest();
-          sendRequest(); // the same request twice in one attempt: the callee retried by itself
+          sendRequest(503);
+          sendRequest(); // the same request again after it failed, in one attempt: the callee retried by itself
           return errAsync(unavailable());
         }),
       )(callRequest()).catch(() => {});
@@ -826,11 +909,99 @@ describe("retry", () => {
 
   test("in tests and the emulator, wrapping a self-retrying call fails loudly", async () => {
     const attempt = retry(() => {
-      sendRequest();
+      sendRequest(503);
       sendRequest();
       return okAsync(1);
     });
     await expect(Promise.resolve(attempt)).rejects.toThrow("already retried internally");
+  });
+
+  // A retry is a request sent again because it failed. Two calls to one endpoint that both worked (two prompts to a
+  // model, a GraphQL or JSON-RPC API with a single URL) are not.
+  test.each([
+    ["a 503", 503, true],
+    ["a 500", 500, true],
+    ["a 429", 429, true],
+    ["a 408", 408, true],
+    ["a 409", 409, true],
+    ["a dropped connection", "error", true],
+    ["a 200", 200, false],
+    ["a 400", 400, false],
+    ["a 401 (a token refreshed, then the call repeated)", 401, false],
+    ["a 404", 404, false],
+    ["no answer yet (two identical requests in flight)", "pending", false],
+  ] as const)("the same request sent again after %s", async (_name, first, isRetry) => {
+    const attempt = retry(() => {
+      sendRequest(first);
+      sendRequest();
+      return okAsync(1);
+    });
+    if (isRetry) await expect(Promise.resolve(attempt)).rejects.toThrow("already retried internally");
+    else expect((await attempt).isOk()).toBe(true);
+  });
+
+  test("requests that differ in their query string are different requests", async () => {
+    await inProduction(async () => {
+      await wrapCall(() =>
+        retry(() => {
+          sendRequest(503, "/items?page=1");
+          sendRequest(200, "/items?page=2"); // the next page, not a second try
+          return okAsync(1);
+        }),
+      )(callRequest());
+      expect(writes[0].retries).toBeUndefined();
+    });
+  });
+
+  test("the repeated request is logged without its query string, which can hold a secret", async () => {
+    await inProduction(async () => {
+      await wrapCall(() =>
+        retry(() => {
+          sendRequest(503, "/cb?auth=SECRETVALUE123");
+          sendRequest(200, "/cb?auth=SECRETVALUE123");
+          return okAsync(1);
+        }),
+      )(callRequest());
+      expect(writes[0].retries).toEqual([
+        expect.objectContaining({ repeatedRequest: { request: "POST https://api.example.com/cb", count: 2 } }),
+      ]);
+      expect(JSON.stringify(writes[0])).not.toContain("SECRETVALUE123");
+    });
+  });
+
+  test("the check does not depend on recording the calls per host", async () => {
+    configure({ recordExternalCalls: false });
+    const attempt = retry(() => {
+      sendRequest(503);
+      sendRequest();
+      return okAsync(1);
+    });
+    await expect(Promise.resolve(attempt)).rejects.toThrow("already retried internally");
+  });
+
+  test("requests made with the http module are checked the same way", async () => {
+    const send = (status: number) => {
+      const request = { method: "GET", protocol: "https:", host: "api.stripe.com", path: "/v1/customers" };
+      publish("http.client.request.start", { request });
+      publish("http.client.response.finish", { request, response: { statusCode: status } });
+    };
+    const retried = retry(() => {
+      send(502);
+      send(200);
+      return okAsync(1);
+    });
+    await expect(Promise.resolve(retried)).rejects.toThrow("already retried internally");
+    const fine = await retry(() => {
+      send(200);
+      send(200);
+      return okAsync(1);
+    });
+    expect(fine.isOk()).toBe(true);
+  });
+
+  test("a nested retry() that had nothing to retry is not an internal retry of the outer one", async () => {
+    const result = await retry(() => retry(() => okAsync(1), { baseDelayMs: 1 }), { baseDelayMs: 1 });
+    expect(result.isOk()).toBe(true);
   });
 
   test("a single request per attempt, or an allowed repeat, is not an internal retry", async () => {
@@ -846,7 +1017,7 @@ describe("retry", () => {
     expect(state.calls).toBe(2);
     const polling = await retry(
       () => {
-        sendRequest();
+        sendRequest(503); // polling that asks again after a failure, on purpose
         sendRequest();
         return okAsync(1);
       },
@@ -1067,6 +1238,16 @@ describe("idempotent events", () => {
     await handler(delivery("e1"));
     expect(state.runs).toBe(2);
     expect([...store.entries.values()]).toEqual(["done"]);
+  });
+
+  test("a plain Error returned from the handler is a retryable failure too: the claim is released", async () => {
+    const store = memoryStore();
+    const state = { runs: 0 };
+    const handler = wrapEvent(() => (++state.runs === 1 ? errAsync(new Error("db down")) : okAsync(undefined)), { idempotency: store });
+    await expect(handler(delivery("e1"))).rejects.toMatchObject({ code: "internal", retryable: true });
+    expect(store.entries.size).toBe(0); // marked done, the redelivery would be skipped as a duplicate and the work lost
+    await handler(delivery("e1"));
+    expect(state.runs).toBe(2);
   });
 
   test("a failure that is acknowledged counts as processed", async () => {

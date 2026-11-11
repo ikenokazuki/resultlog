@@ -5,19 +5,34 @@ import { AppError, DeadlineExceeded, httpStatus } from "./errors.js";
 import { fingerprint } from "./fingerprint.js";
 import { summarizeLlm } from "./llm.js";
 import { type HandlerOptions, settings } from "./options.js";
-import { emit, REPORTED_ERROR_EVENT } from "./output.js";
+import { emit, errorFields, REPORTED_ERROR_EVENT } from "./output.js";
 import { als, type HttpInfo, hasActor, LABELS, type Store } from "./state.js";
 import type { Outcome, Settled } from "./types.js";
 
-function toAppError(e: unknown): AppError {
+/** What a thrown value, or an error returned in a Result that is not an AppError, is logged and answered as. */
+export function toAppError(e: unknown): AppError {
   if (e instanceof AppError) return e;
   if (e instanceof HttpsError && e.code !== "ok") {
     const details = typeof e.details === "object" && e.details !== null ? (e.details as Record<string, unknown>) : undefined;
     return new AppError(e.message, { code: e.code, publicMessage: e.message, details, cause: e });
   }
   const error = new AppError(e instanceof Error ? e.message : String(e), { code: "internal", cause: e });
-  if (e instanceof Error && e.stack) error.stack = e.stack; // group in Error Reporting by the original throw site
+  if (e instanceof Error) {
+    if (e.stack) error.stack = e.stack; // group in Error Reporting by the original throw site
+    // Name it for what it was, so that a TypeError reads as one in the log, in the metric labels and in the fingerprint,
+    // not as "AppError". The client never sees the name: only a WARNING error explains itself (see toHttpsError).
+    if (e.name) error.name = e.name;
+  }
   return error;
+}
+
+/**
+ * The cause as the entry shows it. A thrown exception reaches the entry as an AppError that took over its stack (so that
+ * Error Reporting groups by the real throw site), and that stack is the entry's message already: it is written once.
+ */
+function causeOf(error: AppError): unknown {
+  const { cause } = error;
+  return cause instanceof Error && cause.stack !== undefined && cause.stack === error.stack ? errorFields(cause, { stack: false }) : cause;
 }
 
 let coldStart = true;
@@ -152,6 +167,7 @@ function finish(store: Store, settled: Settled<unknown>, defaults: Defaults): vo
       secured ||
       durationMs >= settings.slowMs ||
       "handledErrors" in store.attrs ||
+      "retries" in store.attrs || // it retried, something inside retried, or it wanted to and could not: worth seeing every time
       "coldStart" in store.attrs ||
       store.attrs.duplicate === true ||
       (store.llm !== undefined && store.llm.truncated + store.llm.blocked + store.llm.interrupted > 0);
@@ -193,7 +209,7 @@ function finish(store: Store, settled: Settled<unknown>, defaults: Defaults): vo
     retryable: e.retryable,
     durationMs,
     breadcrumbs: store.crumbs,
-    cause: e.cause,
+    cause: causeOf(e),
   };
   const extra = Object.keys(labels).length > 0 ? { [LABELS]: labels } : {};
   if (e.severity === "WARNING") emit("WARNING", e.message, payload, extra);
