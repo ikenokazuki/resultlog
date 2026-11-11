@@ -148,6 +148,7 @@ Firebase Functions と Result 型を組み合わせるプロジェクトでは�
 - [ログの費用](#ログの費用)
 - [マスキング](#マスキング)
 - [制限事項](#制限事項)
+- [0.1 からのアップグレード](#01-からのアップグレード)
 - [開発](#開発)
 - [ライセンス](#ライセンス)
 
@@ -2356,6 +2357,18 @@ Cloud Logging は、毎月プロジェクトあたり最初の 50 GiB を超え�
 - タイムアウトのガードは、遅い実行に代わって応答しますが、その処理自体は止められません。中断できる呼び出しには `logContext.signal` を渡してください。
 - スタックトレースが残るのは、返したり throw したりしたものが `Error` の場合だけです。文字列ではなく `AppError` のサブクラスを返してください。
 - resultlog が書き出す項目（`actor`、`auditEvent`、`auditEvents`、`securityEvent`、`securityEvents`、`httpRequest`、`context`、`errorName`、`errorCode`、`fingerprint`、`publicMessage`、`retryable`、`durationMs`、`breadcrumbs`、`cause`、`sampleRate`、`handledErrors`、`retries`、`external`、`llm`、`coldStart`、`duplicate`、`provider`、`upstream`）は、同じ名前の属性を上書きします。
+
+## 0.1 からのアップグレード
+
+0.2.0 では、プロジェクトがインストールするものと、ログやハンドラの型のいくつかが変わります。ハンドラのコードを変える必要はありませんが、アラートやクエリの見直しが要ることがあります。
+
+- **インストール。** neverthrow は resultlog に同梱され、再エクスポートされます。`npm install resultlog` だけで済み、`import { ok, err, ResultAsync } from "resultlog"` と書けます。これまでどおり `neverthrow` から自分で import してもかまいません。Node 20 はサポート外になり、Node 22 以上が必要です。
+- **throw された例外の `errorName` が、その例外自身の名前**（`TypeError`）になります。以前は `AppError` でした。throw された例外について `errorName="AppError"` で作ったアラートやクエリは、直してください。スタックは `message` に 1 回だけ書かれ、`cause` では繰り返されません。
+- **`actor.ip` は、プロキシが見たアドレス**で、クライアントが書いたアドレスではありません。以前は Express の `req.ip`（`X-Forwarded-For` の左端のエントリ）で、クライアントが決められる値でした。`httpRequest.remoteIp` も同じ値になります。Firebase Hosting などの CDN の後ろでは `proxyHops` を上げてください。[誰が呼んだか](#誰が呼んだか)を参照してください。ほとんどのアカウントが 1 つのアドレスを共有していると、digest がそれを示唆します。
+- **重ねがけリトライの検知が狭くなりました。** `retry()` が止まるのは、失敗（応答なし、408、409、429、5xx）の後に同じリクエストが再送されたときだけです。応答が返った 2 つのリクエストでは止まりません。繰り返されたリクエストはクエリ文字列を除いて記録され、リトライした実行はサンプリングで落とされません。
+- **Result のエラーは、どんな `Error` でもかまいません。** `AppError` でないものは、throw された例外と同じに扱われます。文字列や素のオブジェクトは、これまでどおりコンパイルエラーです。
+- **`digest --pseudonymize`** が、`httpRequest` と `context` の中の uid、アドレス、ユーザーエージェントも仮名にするようになりました。コマンドは `--name=value` の形も受け付けます。
+- **Firebase が、callable の呼び出しごとに自前のエントリを書きます**（DEBUG、「Callable request verification passed」）。resultlog のものではありません。除外のしかたは[ログの費用](#ログの費用)にあります。
 
 ## 開発
 
