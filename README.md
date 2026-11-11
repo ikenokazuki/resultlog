@@ -148,6 +148,7 @@ Projects that combine Firebase Functions with a Result type tend to rebuild the 
 - [Log cost](#log-cost)
 - [Redaction](#redaction)
 - [Limitations](#limitations)
+- [Upgrading from 0.1](#upgrading-from-01)
 - [Development](#development)
 - [License](#license)
 
@@ -2356,6 +2357,18 @@ Circular references become `"[Circular]"` and `bigint` values become strings. Ob
 - The timeout guard answers for a slow invocation but can't stop its code. Pass `logContext.signal` to the calls that can be cancelled.
 - A stack trace survives only if what you return or throw is an `Error`. Return `AppError` subclasses, not strings.
 - The fields resultlog writes (`actor`, `auditEvent`, `auditEvents`, `securityEvent`, `securityEvents`, `httpRequest`, `context`, `errorName`, `errorCode`, `fingerprint`, `publicMessage`, `retryable`, `durationMs`, `breadcrumbs`, `cause`, `sampleRate`, `handledErrors`, `retries`, `external`, `llm`, `coldStart`, `duplicate`, `provider`, `upstream`) replace attributes with the same name.
+
+## Upgrading from 0.1
+
+0.2.0 changes what a project installs, and several things in the log and in a handler's types. Nothing in your handlers has to change, but some alerts and queries might.
+
+- **Install.** neverthrow comes with resultlog and is re-exported: `npm install resultlog`, and `import { ok, err, ResultAsync } from "resultlog"`. You may keep importing it from `neverthrow` yourself. Node 20 is no longer supported: the package needs Node 22 or later.
+- **A thrown exception's `errorName` is its own name** (`TypeError`), where it was `AppError`. Update the alerts and queries that match `errorName="AppError"` for thrown exceptions. The stack is written once, in `message`, and `cause` no longer repeats it.
+- **`actor.ip` is the address your proxies saw**, not the one the client wrote. It was Express's `req.ip`, the left-most `X-Forwarded-For` entry, which a client chooses. `httpRequest.remoteIp` follows. Behind Firebase Hosting or another CDN, raise `proxyHops`: see [Who made the call](#who-made-the-call). The digest hints at it when nearly every account shares one address.
+- **The stacked-retry check is narrower.** `retry()` stops only when a request was sent again after a failure (no answer, 408, 409, 429 or a 5xx status), so two answered requests to one endpoint no longer stop it. The repeated request is logged without its query string, and a run that retried is never sampled away.
+- **A Result's error may be any `Error`**: one that is not an `AppError` is treated like a thrown exception. Strings and plain objects are still compile errors.
+- **`digest --pseudonymize`** now also covers the uid, address and user agent in `httpRequest` and `context`, and the commands take `--name=value`.
+- **Firebase writes an entry of its own** for every callable call (DEBUG, "Callable request verification passed"). It is not resultlog's; [Log cost](#log-cost) shows how to exclude it.
 
 ## Development
 
