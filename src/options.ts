@@ -2,7 +2,7 @@ import type { LlmCall } from "./llm.js";
 import type { LogEntry } from "./output.js";
 
 export interface LogOptions {
-  /** Share (0–1) of successful invocations that are logged. Failures, slow runs, audits, handled errors, duplicates and cold starts are always kept. */
+  /** Share (0–1) of successful invocations that are logged. Failures, slow runs, audits, handled errors, retries, duplicates and cold starts are always kept. */
   successSampleRate?: number;
   /** Successful invocations at least this slow (ms) are always logged. */
   slowMs?: number;

@@ -1,5 +1,5 @@
 import { err, type Result, ResultAsync } from "neverthrow";
-import { type AttemptScope, attemptScope, countRequest, watchRequests } from "./calls.js";
+import { type AttemptScope, attemptScope, noteAnswer, noteSent, retriedRequest, watchRequests } from "./calls.js";
 import { logContext } from "./context.js";
 import type { AppError } from "./errors.js";
 import { ExternalError } from "./external.js";
@@ -32,7 +32,10 @@ export interface RetryOptions {
   budgetMs?: number;
   /** You set the SDK's own retries to 0, so a provider in SelfRetryingProviders may be retried here. */
   sdkRetriesDisabled?: boolean;
-  /** The call repeats the same request on purpose (polling), so repeats are not an internal retry. */
+  /**
+   * The call sends the same request again after a failure on purpose, so that is not an internal retry. Two requests that
+   * both worked never count as a retry, so polling that gets answers needs no option.
+   */
   allowRepeatedRequests?: boolean;
 }
 
@@ -57,8 +60,8 @@ const sleep = (ms: number, signal?: AbortSignal) =>
 /**
  * Retries `fn` while it fails with a `retryable` error: waits Retry-After when given, otherwise a jittered
  * exponential backoff, within `budgetMs`. It never stacks on another retry layer. If one attempt sent the same HTTP
- * request twice, something inside (an SDK, axios-retry, a nested retry()) already retried: it stops there, and in
- * tests and the emulator it throws so you notice.
+ * request again after it had failed, something inside (an SDK, axios-retry, a nested retry()) already retried: it stops
+ * there, and in tests and the emulator it throws so you notice.
  */
 export function retry<T, E extends AppError, const O extends RetryOptions = {}>(
   fn: (() => Outcome<T, E>) & NoInfer<DoubleRetryGuard<E, O>>,
@@ -74,10 +77,11 @@ export function retry<T, E extends AppError, const O extends RetryOptions = {}>(
     if (store?.signal.aborted) return err(store.signal.reason as E);
     let waitedMs = 0;
     for (let attempt = 1; ; attempt++) {
-      countRequest("retry() attempt", parent); // a nested retry() looks like a repeated request to its caller
+      noteSent("retry() attempt", parent); // a nested retry() looks like a request that is sent again, to its caller
       const scope: AttemptScope = { requests: new Map(), parent };
       const result = await attemptScope.run(scope, async () => fn());
-      const repeated = allowRepeatedRequests ? undefined : [...scope.requests].find(([, count]) => count > 1);
+      noteAnswer("retry() attempt", parent, result.isErr());
+      const repeated = allowRepeatedRequests ? undefined : retriedRequest(scope);
       const done = (stoppedBy?: string) => {
         // Worth a record: it retried, something inside retried, or it wanted to retry but could not.
         if (attempt > 1 || repeated || (stoppedBy !== undefined && stoppedBy !== "not-retryable")) {
@@ -86,7 +90,7 @@ export function retry<T, E extends AppError, const O extends RetryOptions = {}>(
             waitedMs: Math.round(waitedMs),
             outcome: result.isOk() ? "ok" : result.error.code,
             ...(stoppedBy ? { stoppedBy } : {}),
-            ...(repeated ? { repeatedRequest: { request: repeated[0], count: repeated[1] } } : {}),
+            ...(repeated ? { repeatedRequest: repeated } : {}),
           });
         }
         return result;
@@ -94,7 +98,7 @@ export function retry<T, E extends AppError, const O extends RetryOptions = {}>(
       if (repeated) {
         if (process.env.FUNCTIONS_EMULATOR === "true" || process.env.NODE_ENV === "test") {
           throw new Error(
-            `retry() wraps a call that already retried internally: ${repeated[0]} was sent ${repeated[1]} times in one attempt. ` +
+            `retry() wraps a call that already retried internally: ${repeated.request} was sent again after it failed (${repeated.count} times in one attempt). ` +
               "Remove retry(), turn the inner retries off, or pass { allowRepeatedRequests: true } if the repeats are intended.",
           );
         }
@@ -132,7 +136,7 @@ export function fallback<const A extends readonly [() => Outcome<any, AppError>,
   ...attempts: A
 ): ResultAsync<OutcomeOk<A[number]>, OutcomeErr<A[number]>>;
 
-export function fallback(...attempts: (() => Outcome<unknown>)[]): ResultAsync<unknown, AppError> {
+export function fallback(...attempts: (() => Outcome<unknown, AppError>)[]): ResultAsync<unknown, AppError> {
   const store = als.getStore();
   const run = async (): Promise<Result<unknown, AppError>> => {
     let result!: Result<unknown, AppError>;

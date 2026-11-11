@@ -89,6 +89,18 @@ function hasToJSON(value: object): value is { toJSON(): unknown } {
   return typeof (value as { toJSON?: unknown }).toJSON === "function";
 }
 
+/**
+ * An Error as plain fields. Its message, stack and cause are not enumerable, and `toJSON` (axios, HttpsError) is far
+ * smaller than the own fields. `stack: false` leaves the stack out, for an error whose stack the entry already holds.
+ */
+export function errorFields(error: Error, { stack = true }: { stack?: boolean } = {}): Record<string, unknown> {
+  const { name, message, cause } = error;
+  const fields = hasToJSON(error) ? (error.toJSON() as object) : error;
+  const out: Record<string, unknown> = { ...fields, name, message, stack: error.stack, cause };
+  if (!stack) delete out.stack; // toJSON may carry it as well
+  return out;
+}
+
 function sanitize(value: unknown, depth = 0, seen = new WeakSet<object>()): unknown {
   if (typeof value === "bigint") return value.toString(); // JSON.stringify throws on bigint
   if (typeof value === "string") {
@@ -100,12 +112,7 @@ function sanitize(value: unknown, depth = 0, seen = new WeakSet<object>()): unkn
   if (depth > MAX_DEPTH) return "[Truncated]";
   seen.add(value);
   try {
-    if (value instanceof Error) {
-      // message, stack and cause are non-enumerable. toJSON (axios, HttpsError) is far smaller than the own fields.
-      const { name, message, stack, cause } = value;
-      const fields = hasToJSON(value) ? (value.toJSON() as object) : value;
-      return sanitize({ ...fields, name, message, stack, cause }, depth, seen);
-    }
+    if (value instanceof Error) return sanitize(errorFields(value), depth, seen);
     if (hasToJSON(value)) return sanitize(value.toJSON(), depth, seen); // Date, Timestamp, Buffer, ...
     if (Array.isArray(value)) {
       const items = value.slice(0, MAX_ARRAY).map((v) => sanitize(v, depth + 1, seen));

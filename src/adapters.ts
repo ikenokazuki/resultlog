@@ -3,7 +3,7 @@ import type { AuthBlockingEvent } from "firebase-functions/v2/identity";
 import { ok } from "neverthrow";
 import type { input, output, ZodType } from "zod";
 import { logContext } from "./context.js";
-import { settle } from "./core.js";
+import { settle, toAppError } from "./core.js";
 import { EventInFlight, EventTooOld, httpStatus, InvalidInput, toHttpsError } from "./errors.js";
 import type { IdempotencyStore } from "./idempotency.js";
 import { type HandlerOptions, settings } from "./options.js";
@@ -207,7 +207,7 @@ export function wrapEvent<E>(fn: (event: E) => Outcome<unknown>, eventOptions: E
           );
         try {
           const result = await fn(event);
-          await settleClaim(result.isOk() || !result.error.retryable);
+          await settleClaim(result.isOk() || !toAppError(result.error).retryable); // a plain Error counts as a thrown one: retryable
           return result;
         } catch (e) {
           await settleClaim(false, e);
