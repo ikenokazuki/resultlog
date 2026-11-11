@@ -291,6 +291,7 @@ describe("findings", () => {
     const [finding] = findings(logs);
     expect(finding).toMatchObject({ rule: "many-accounts-one-ip", count: 6 });
     expect(finding?.subject).toBe("ip=203.0.113.5");
+    expect(finding?.hint).toContain("proxyHops"); // every account behind one address is usually a proxy in front of the function
     expect(finding?.evidence).toContain("user0");
     expect(findings(logs)).toHaveLength(1);
   });
@@ -425,6 +426,26 @@ describe("pseudonymize on the entries the library really writes", () => {
       })(authBlockingEvent({ uid })).catch(() => {});
       expect((captured.entries[0] as Record<string, any>).context).toMatchObject({ user: uid });
       expect(textOf(captured.entries).text).not.toContain(uid);
+    } finally {
+      captured.restore();
+    }
+  });
+});
+
+describe("a client that forges X-Forwarded-For", () => {
+  // Express's req.ip, which `actor.ip` was, is the left-most entry: the one the client writes. A client that changes it
+  // on every request used to look like twelve addresses with one refusal each, and the rule never fired.
+  test("cannot spread its refusals over addresses of its own choosing", async () => {
+    const captured = captureLogs();
+    try {
+      for (let i = 1; i <= 12; i++) {
+        const request = callableRequest({}, { uid: "mallory", ip: `192.0.2.${i}` });
+        (request.rawRequest as unknown as { headers: Record<string, string> }).headers["x-forwarded-for"] = `192.0.2.${i}, 203.0.113.9`;
+        await wrapCall(() => err(new AppError("not yours", { code: "permission-denied" })))(request).catch(() => {});
+      }
+      const { findings } = digest(captured.entries).data;
+      expect(findings).toEqual([expect.objectContaining({ rule: "authz-probing", count: 12 })]);
+      expect(findings[0]?.subject).toContain("203.0.113.9");
     } finally {
       captured.restore();
     }

@@ -550,7 +550,7 @@ function defaultRules(withAdmins: boolean): Rule[] {
       name: "many-accounts-one-ip",
       severity: "medium",
       summary: "One address was seen with several accounts.",
-      hint: "Credential stuffing, password spraying or an account farm, or an office or a mobile network behind one address. Compare the accounts' history. If you block, block for a short time (15 minutes or less) rather than for long.",
+      hint: "Credential stuffing, password spraying or an account farm, or an office or a mobile network behind one address. Compare the accounts' history. If you block, block for a short time (15 minutes or less) rather than for long. If nearly every account shares one address, that is a proxy in front of your function and not the clients: raise `proxyHops` in configure().",
       filter: (p) => p.uid !== undefined && p.ip !== undefined,
       key: (p) => p.ip && `ip=${p.ip}`,
       distinct: (p) => p.uid,

@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import type { CallableRequest, CallableResponse, Request, Response } from "firebase-functions/v2/https";
 import type { AuthBlockingEvent } from "firebase-functions/v2/identity";
 import { ok } from "neverthrow";
@@ -27,12 +28,36 @@ function splitArgs<F extends Function>(
     : [first, second as F, third ?? {}];
 }
 
+/** An address as an X-Forwarded-For entry writes it, without a port or brackets; undefined if the entry is no address. */
+function addressOf(entry: string): string | undefined {
+  const bracketed = /^\[([^\]]+)\](?::\d+)?$/.exec(entry)?.[1]; // [2001:db8::1]:443
+  const withPort = /^(\d{1,3}(?:\.\d{1,3}){3}):\d+$/.exec(entry)?.[1]; // 203.0.113.9:4711
+  const address = bracketed ?? withPort ?? entry;
+  return isIP(address) === 0 ? undefined : address;
+}
+
 /**
- * The client address as Express sees it, plus the raw X-Forwarded-For. Its left-most entries come from the client
- * and can be forged; the entries Google's front end appends on the right can be trusted.
+ * The address of the client. Express's `req.ip` is the left-most `X-Forwarded-For` entry, because the Functions Framework
+ * trusts every proxy, and that entry is whatever the client wrote: a client that changes it on every request escapes any
+ * rule that counts per address. What can be trusted are the entries your own proxies added, on the right. With
+ * `proxyHops` of them in front of the function, the client is the entry that many places from the right (Express's
+ * `trust proxy` set to a number does the same). An entry that is no address gives none, never the one the client wrote.
  */
+function clientAddress(req: Request | undefined): string | undefined {
+  const header = req?.headers?.["x-forwarded-for"];
+  const entries = (Array.isArray(header) ? header.join(",") : (header ?? ""))
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  if (entries.length === 0) return req?.ip; // no proxy said anything: the address of the connection
+  const configured = settings.proxyHops;
+  const hops = typeof configured === "number" && Number.isInteger(configured) && configured >= 1 ? configured : 1;
+  return addressOf(entries[Math.max(0, entries.length - hops)] as string);
+}
+
+/** The address of the client, and the raw X-Forwarded-For next to it for whoever wants to read it differently. */
 function requestActor(req: Request | undefined): Record<string, unknown> {
-  return { ip: req?.ip, forwardedFor: req?.headers?.["x-forwarded-for"], userAgent: req?.headers?.["user-agent"] };
+  return { ip: clientAddress(req), forwardedFor: req?.headers?.["x-forwarded-for"], userAgent: req?.headers?.["user-agent"] };
 }
 
 function callActor(request: CallableRequest): Record<string, unknown> {
