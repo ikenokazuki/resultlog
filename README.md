@@ -344,7 +344,7 @@ export const webhook = onRequest(
 );
 ```
 
-- The client address, `X-Forwarded-For` and user agent are recorded as the `actor`. Add a uid you verified yourself with [`logContext.setActor`](#logcontextsetactor-method).
+- The client address (see [`proxyHops`](#who-made-the-call)), `X-Forwarded-For` and user agent are recorded as the `actor`. Add a uid you verified yourself with [`logContext.setActor`](#logcontextsetactor-method).
 - The entry's `httpRequest` has the method, the path (never the query string, which can hold secrets), the status and the latency.
 
 [⬆️ Back to top](#table-of-contents)
@@ -972,6 +972,8 @@ interface LogOptions {
   price?: (call: LlmCall) => number | undefined;
   /** "security" (default): the actor on audit and security entries. "all": on every entry. */
   actor?: "security" | "all";
+  /** Proxies between the client and your function, Google's front end included. `actor.ip` is that many entries from the right of X-Forwarded-For. Default 1. */
+  proxyHops?: number;
   /** Receives every entry instead of the platform logger. A sink that throws is ignored. */
   sink?: (entry: LogEntry) => void;
 }
@@ -1812,7 +1814,7 @@ resultlog writes the entries an investigation of unauthorized access needs, and 
 - **Actor.** Each wrapped invocation records who made the request: `uid`, `signInProvider`, `authTime` (when the user signed in), App Check `appId` and `appCheck` (`verified`, `missing`, or `replayed` for a token that was used before), `ip`, `forwardedFor` (the raw `X-Forwarded-For`) and `userAgent`. The actor is written on audit and security entries. To have it on every entry, so that the digest can see an account used from many addresses in ordinary traffic, use `configure({ actor: "all" })`; see [Who made the call](#who-made-the-call). In `onRequest`, add a uid you verified yourself with `logContext.setActor({ uid })`.
 - **Security events.** They use [OWASP Logging Vocabulary](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Vocabulary_Cheat_Sheet.html) names and the label `security`. `unauthenticated` and `permission-denied` are logged as `securityEvent: "authz_fail"`, rejected input as `"input_validation_fail"`, and a replayed App Check token as `"authn_token_reuse"`. An error can declare its own with `securityEvent`, and `logContext.security()` records one where nothing fails. See [Detecting unauthorized access](#detecting-unauthorized-access).
 - **Audit trail.** `logContext.audit(event, data?)` writes a NOTICE entry with the actor and the label `audit` straight away, so it survives a timeout. The invocation's final entry lists the same events under `auditEvents`, with the outcome. Use OWASP names where they fit: `authz_change`, `authz_admin`, `sensitive_read`, `sensitive_update`, `sensitive_delete`, `user_created`, `user_deleted`.
-- **IP addresses** can be personal data when combined with other information (OWASP notes this too), so keep these entries in a bucket with restricted access. The left-most `X-Forwarded-For` entries come from the client and can be forged; the entries Google's front end appends on the right can be trusted.
+- **IP addresses** can be personal data when combined with other information (OWASP notes this too), so keep these entries in a bucket with restricted access. `actor.ip` is the address your trusted proxies saw ([`proxyHops`](#who-made-the-call)): the entries on the left of `X-Forwarded-For` are written by the client and can be forged.
 - **Check auth inside the handler.** A call rejected by `onCall`'s `authPolicy` never reaches your handler, so nothing records the denial. To log it, check inside the handler and throw `HttpsError("permission-denied", …)`.
 
 An audit entry:
@@ -1891,6 +1893,10 @@ resultlog records what your functions can see, in the shape security tools expec
 
 Audit and security entries carry the `actor`. `configure({ actor: "all" })` puts it on every entry, which is what the digest's per-account and per-address rules need to see ordinary traffic. Two things to weigh: it adds 100 to 250 bytes to each entry, and IP addresses and uids are personal data under many privacy laws, so keep the retention of those logs short and restrict who can read them. With `successSampleRate` below 1 the digest sees only a sample of ordinary traffic.
 
+**The address.** `actor.ip` is the address your own proxies saw, not the one the client wrote. Express's `req.ip` is the left-most `X-Forwarded-For` entry, because the Functions Framework that runs your function turns `trust proxy` on for every hop (version 5.0.5 of `@google-cloud/functions-framework` does: `app.enable('trust proxy')`), so a client can put any address there, and a client that changes it on every request escapes every rule that counts per address. The entries that the proxies in front of your function append are on the right, so resultlog takes the one that many places from the right: `configure({ proxyHops })`, default 1, with the meaning of Express's [`trust proxy` set to a number](https://expressjs.com/en/guide/behind-proxies.html). The raw header stays in `actor.forwardedFor`. An entry that is no address leaves `ip` out; it never falls back to what the client wrote.
+
+What Google's front end appends is not documented. [Google's page on request headers](https://docs.cloud.google.com/functions/docs/reference/headers) says only that the first address in `X-Forwarded-For` is "generally" the client's, and developers report that a function called directly gets one entry appended at the end ([an example](https://discuss.google.dev/t/cloud-run-which-client-ip-can-i-safely-use-for-rate-limiting/409611)), which is what the default of 1 assumes. Check it for your setup: call the function from an address you know and read `actor.forwardedFor` in the entry. Behind Firebase Hosting or another CDN there is more than one proxy: set `proxyHops` to the number of entries from the client's address to the end of that header, the client's own included. If nearly every account in the digest shares one address, `proxyHops` is too low.
+
 ### Sign-ins: wrapBlocking
 
 [`wrapBlocking`](#wrapblocking-function) puts Identity Platform's `beforeUserSignedIn` and `beforeUserCreated` on the record: every sign-in that gets through is the audit event `authn_login_success` (a sign-up is `user_created`), and a denial is the security event `authn_login_fail`.
@@ -1948,7 +1954,7 @@ For the alerts of [Cloud Monitoring](#cloud-monitoring), with the steps for each
 - **No scanning of payloads for attack strings.** That is a list of patterns with many false positives; Cloud Armor and Arcjet do it better.
 - **No rate limiting or lockout.** They need shared state, and an attacker can turn a counter in Firestore into cost. Put them at the edge: App Check, reCAPTCHA Enterprise, Cloud Armor, or a service built for it such as Arcjet or Upstash.
 - **No geolocation, IP reputation or device fingerprints.** They need data resultlog doesn't have.
-- **Not verified against a live project:** the mapping of the labels, the alerts, and Identity Platform in production (the blocking function was exercised in the Auth emulator only).
+- **Not verified against a live project:** the mapping of the labels, the alerts, and Identity Platform in production (the blocking function was exercised in the Auth emulator only). Also what Google's front ends append to `X-Forwarded-For`, so whether the default `proxyHops` of 1 is right for your setup, and whether the exclusion for Firebase's own callable entry drops it. The callable, HTTP and timeout behaviour was exercised in the real Functions emulator (`npm run emulator`).
 
 ## Cloud Monitoring
 
@@ -2312,6 +2318,19 @@ Cloud Logging charges $0.50 per GiB ingested after the first 50 GiB per project 
 - **`httpRequest` and `context`.** The `httpRequest` of a callable or HTTP function adds about 90 bytes to each of its entries, and the `context` of an ERROR about 90 more; for 3 million invocations a month that is about 0.25 GiB. Where the actor is shown, the address and user agent are written in `httpRequest` as well as in `actor` (and in the `context` of an ERROR), which adds up to a few hundred bytes more when the user agent is long. They are standard fields that Logs Explorer and Error Reporting read themselves; there is no switch to turn them off.
 - **Estimate.** Entries per month × average size. For example, 3 million invocations at about 1 KB each is roughly 3 GiB a month, well within the free 50 GiB.
 - **Platform request logs.** Cloud Run also writes a request log for every HTTP call (`run.googleapis.com/requests`), which largely duplicates the wide event. An exclusion filter such as `logName:"run.googleapis.com%2Frequests" AND httpRequest.status<400` drops the successful ones. The pricing page charges for logs streamed into log buckets, so excluded entries shouldn't be billed; confirm this on your own bill. The wide event of a callable or HTTP function carries `httpRequest` with the same status and latency, so a query on `httpRequest.status>=500` still finds what your functions answered; the request log you keep (status 400 and up) also has the cases where the platform answered instead of your code. That request log is the only record of the client IP for ordinary (non-audit) requests.
+- **Firebase's own entry for every callable call.** The callable handler of `firebase-functions` 7.4 writes a DEBUG entry, "Callable request verification passed", for every call whose App Check and auth tokens passed verification (read in its source and seen in the Functions emulator). It carries the label `firebase-log-type: callable-request-verification` (written as `logging.googleapis.com/labels`, which Cloud Logging stores as the entry's [`labels`](https://docs.cloud.google.com/logging/docs/structured-logging)) and a `verifications` field with `VALID`, `MISSING` or `INVALID` for each token. It is 200 to 300 bytes, about as large as the wide event of a successful call, which already says the same in `actor.appCheck` and `authUid`. When verification fails, the same code writes a WARNING with the same label, and that one is worth keeping: the exclusion is limited to DEBUG. In the console, open Logs Router, edit the `_Default` sink and add an exclusion with this filter (the label key has a hyphen, so it is [quoted, as the query language asks](https://docs.cloud.google.com/logging/docs/view/logging-query-language)):
+
+  ```text
+  resource.type="cloud_run_revision" AND severity=DEBUG AND labels."firebase-log-type"="callable-request-verification"
+  ```
+
+  Or with gcloud, whose flag takes `name` and `filter`, and optionally `description` and `disabled` ([reference](https://docs.cloud.google.com/sdk/gcloud/reference/logging/sinks/update)):
+
+  ```sh
+  gcloud logging sinks update _Default --add-exclusion='name=firebase-callable-verification,filter=resource.type="cloud_run_revision" AND severity=DEBUG AND labels."firebase-log-type"="callable-request-verification"'
+  ```
+
+  An entry that matches an exclusion filter is not routed to the sink's destination ([Logs Router](https://docs.cloud.google.com/logging/docs/routing/overview)). Look at the sink afterwards with `gcloud logging sinks describe _Default`, and at your bill. The filter is tested against the entries Firebase writes, not against Cloud Logging itself.
 
 ## Redaction
 
@@ -2346,8 +2365,11 @@ bun test
 npm run typecheck
 npm run build          # dist/esm and dist/cjs
 npm run smoke          # the build, on the Node that runs it
+npm run emulator       # the packed package in the real Functions emulator (needs the firebase CLI)
 npm pack --dry-run     # what a publish would contain
 ```
+
+`npm run emulator` packs the package, installs it (and nothing else of resultlog's: neverthrow comes with it) into a scratch Firebase project, runs the Functions emulator and calls 13 functions over HTTP, then checks what they answered and what they logged: statuses and `details`, a thrown exception's name, the timeout guard, the stacked-retry check, the trace, the client address behind `X-Forwarded-For`, and the DEBUG entry that Firebase writes for every callable call. It needs the `firebase` CLI (`npm install -g firebase-tools`, or `FIREBASE_CLI=/path/to/firebase`), Node 22 or later and a network for `npm install`; Java is not needed, because only the Functions emulator runs (no Firestore or Pub/Sub emulator, so event triggers are not covered). It takes about a minute and is not part of CI. A scratch project that failed a check is kept, with the emulator's output in it.
 
 The source is one module per concern under `src/`; `AGENTS.md` describes the layout, the conventions and how a release is made. CI installs through [Takumi Guard](https://shisho.dev/docs/ja/t/guard/quickstart/npm/), and a release is staged on npm by a workflow and approved by a maintainer with 2FA.
 

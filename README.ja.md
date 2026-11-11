@@ -344,7 +344,7 @@ export const webhook = onRequest(
 );
 ```
 
-- クライアントのアドレス、`X-Forwarded-For`、ユーザーエージェントは `actor` に記録されます。自分で検証した uid は [`logContext.setActor`](#logcontextsetactor-method) で足してください。
+- クライアントのアドレス（[`proxyHops`](#誰が呼んだか)を参照）、`X-Forwarded-For`、ユーザーエージェントは `actor` に記録されます。自分で検証した uid は [`logContext.setActor`](#logcontextsetactor-method) で足してください。
 - エントリの `httpRequest` には、メソッド、パス（クエリ文字列は含めません。秘密情報が入りうるためです）、ステータス、所要時間が入ります。
 
 [⬆️ 先頭へ](#目次)
@@ -972,6 +972,8 @@ interface LogOptions {
   price?: (call: LlmCall) => number | undefined;
   /** "security"（既定）: actor は監査・セキュリティのエントリにだけ載る。"all": 全エントリに載る。 */
   actor?: "security" | "all";
+  /** クライアントと関数のあいだにあるプロキシの数（Google のフロントエンドを含む）。`actor.ip` は X-Forwarded-For の右からその数だけ数えたエントリ。既定は 1。 */
+  proxyHops?: number;
   /** プラットフォームのロガーの代わりに、全エントリを受け取る。throw する sink は無視される。 */
   sink?: (entry: LogEntry) => void;
 }
@@ -1812,7 +1814,7 @@ resultlog は、不正アクセスの調査に必要なログを書き出し、�
 - **実行者（actor）。** ラップした実行ごとに、リクエストした人の情報を記録します: `uid`、`signInProvider`、`authTime`（サインインした時刻）、App Check の `appId` と `appCheck`（`verified`、`missing`、使用済みのトークンなら `replayed`）、`ip`、`forwardedFor`（`X-Forwarded-For` の生の値）、`userAgent`。actor は監査ログとセキュリティログに書き出します。通常のトラフィックで 1 アカウントが多数のアドレスから使われているかを digest が見られるよう、全エントリに載せたい場合は `configure({ actor: "all" })` を使います（[誰が呼んだか](#誰が呼んだか)を参照）。`onRequest` では、自分で検証した uid を `logContext.setActor({ uid })` で追加してください。
 - **セキュリティイベント。** [OWASP Logging Vocabulary](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Vocabulary_Cheat_Sheet.html) の名前と `security` ラベルを使います。`unauthenticated` と `permission-denied` は `securityEvent: "authz_fail"`、不正な入力は `"input_validation_fail"`、再利用された App Check トークンは `"authn_token_reuse"` として記録します。エラーに `securityEvent` で独自の名前を宣言でき、何も失敗していない場所では `logContext.security()` で記録できます。[不正アクセスの検知](#不正アクセスの検知)を参照してください。
 - **監査証跡。** `logContext.audit(event, data?)` は、actor と `audit` ラベル付きの NOTICE ログをその場で書き出すので、タイムアウトしても消えません。実行の最後のログにも同じイベントが `auditEvents` として結果とともに残ります。当てはまるものは OWASP の名前を使ってください: `authz_change`、`authz_admin`、`sensitive_read`、`sensitive_update`、`sensitive_delete`、`user_created`、`user_deleted`
-- **IP アドレス**は、他の情報と組み合わせると個人情報になり得ます（OWASP も注意しています）。これらのログはアクセス権を絞ったバケットに保管してください。`X-Forwarded-For` の左側の値はクライアントが付けたもので偽装できます。Google のフロントエンドが右側に付け足した値は信頼できます。
+- **IP アドレス**は、他の情報と組み合わせると個人情報になり得ます（OWASP も注意しています）。これらのログはアクセス権を絞ったバケットに保管してください。`actor.ip` は、信頼するプロキシが見たアドレスです（[`proxyHops`](#誰が呼んだか)）。`X-Forwarded-For` の左側のエントリはクライアントが書いたもので、偽装できます。
 - **認証チェックはハンドラ内で。** `onCall` の `authPolicy` で弾かれた呼び出しはハンドラに届かないため、拒否が記録されません。記録したい場合は、ハンドラ内でチェックして `HttpsError("permission-denied", …)` を throw してください。
 
 監査ログの例:
@@ -1891,6 +1893,10 @@ resultlog は、関数から見えるものを、セキュリティツールが�
 
 監査ログとセキュリティログには `actor` が付きます。`configure({ actor: "all" })` にすると全エントリに付き、digest のアカウント別・アドレス別のルールが通常のトラフィックを見られるようになります。検討すべき点が 2 つあります。1 エントリあたり 100〜250 バイト増えること、そして IP アドレスと uid は多くのプライバシー法で個人情報にあたるため、これらのログの保持期間を短くし、読める人を絞ることです。`successSampleRate` が 1 未満だと、digest が見られる通常のトラフィックは一部だけになります。
 
+**アドレス。** `actor.ip` は、クライアントが書いたアドレスではなく、自分たちのプロキシが見たアドレスです。Express の `req.ip` は `X-Forwarded-For` の左端のエントリですが、これは関数を動かす Functions Framework が、すべての中継を信頼する `trust proxy` を有効にしているためです（`@google-cloud/functions-framework` の 5.0.5 は `app.enable('trust proxy')` としています）。そのため、クライアントは好きなアドレスをそこに書けます。リクエストごとに値を変えるクライアントは、アドレス単位で数えるどのルールからも逃げられます。関数の手前にあるプロキシが付け足したエントリは右側にあるので、resultlog は右からその数だけ数えたエントリを取ります。それが `configure({ proxyHops })` で、既定は 1、意味は Express の [`trust proxy` に数値を指定した場合](https://expressjs.com/en/guide/behind-proxies.html)と同じです。生のヘッダーは `actor.forwardedFor` に残ります。アドレスでないエントリのときは `ip` を出しません。クライアントが書いた値に戻ることはありません。
+
+Google のフロントエンドが何を付け足すかは、文書化されていません。[Google のリクエストヘッダーのページ](https://docs.cloud.google.com/functions/docs/reference/headers)は、`X-Forwarded-For` の最初のアドレスは「通常は」クライアントのものだと書くだけです。関数を直接呼ぶと末尾に 1 エントリ付け足される、という開発者の報告があります（[一例](https://discuss.google.dev/t/cloud-run-which-client-ip-can-i-safely-use-for-rate-limiting/409611)）。既定値 1 は、これを前提にしています。自分の構成で確かめてください。分かっているアドレスから関数を呼び、エントリの `actor.forwardedFor` を読みます。Firebase Hosting などの CDN の後ろでは、プロキシが 1 つではありません。`proxyHops` には、そのヘッダーの、クライアントのアドレスから末尾までのエントリ数（クライアント自身を含む）を指定します。digest でほとんどのアカウントが 1 つのアドレスを共有していたら、`proxyHops` が小さすぎます。
+
 ### サインイン: wrapBlocking
 
 [`wrapBlocking`](#wrapblocking-function) は、Identity Platform の `beforeUserSignedIn` と `beforeUserCreated` を記録に載せます。通ったサインインはすべて監査イベント `authn_login_success`（サインアップは `user_created`）になり、拒否はセキュリティイベント `authn_login_fail` になります。
@@ -1948,7 +1954,7 @@ Cloud Monitoring のアラートと、アラートごとの手順は、[アラ�
 - **ペイロードの攻撃文字列のスキャン。** パターンの一覧になり、誤検知が多くなります。Cloud Armor や Arcjet のほうが適しています。
 - **レート制限とロックアウト。** 共有の状態が必要で、攻撃者が Firestore のカウンタを課金に変えることもできます。手前で行ってください: App Check、reCAPTCHA Enterprise、Cloud Armor、または Arcjet や Upstash のような専用のサービス。
 - **位置情報、IP の評判、端末のフィンガープリント。** resultlog が持っていないデータが必要です。
-- **実際のプロジェクトでは未確認:** ラベルの変換、アラート、本番の Identity Platform（ブロッキング関数は Auth エミュレータでのみ確認しました）。
+- **実際のプロジェクトでは未確認:** ラベルの変換、アラート、本番の Identity Platform（ブロッキング関数は Auth エミュレータでのみ確認しました）。また、Google のフロントエンドが `X-Forwarded-For` に何を付け足すか（つまり既定の `proxyHops` の 1 が自分の構成で正しいか）と、Firebase 自身の callable エントリの除外が実際にそれを落とすか。callable、HTTP、タイムアウトの挙動は、実際の Functions エミュレータで確認しています（`npm run emulator`）。
 
 ## Cloud Monitoring
 
@@ -2312,6 +2318,19 @@ Cloud Logging は、毎月プロジェクトあたり最初の 50 GiB を超え�
 - **`httpRequest` と `context`。** callable と HTTP 関数の `httpRequest` は、そのエントリごとに約 90 バイト増え、ERROR の `context` はさらに約 90 バイト増えます。月 300 万回の実行なら約 0.25 GiB です。actor が出る場所では、アドレスとユーザーエージェントが `actor` に加えて `httpRequest`（ERROR では `context` にも）に書かれるので、ユーザーエージェントが長いと数百バイトさらに増えます。どちらも Logs Explorer と Error Reporting が自分で読む標準のフィールドです。オフにする設定はありません。
 - **見積もり。** 月間のエントリ数 × 平均サイズで計算します。たとえば 1 回あたり約 1 KB の実行が月 300 万回なら約 3 GiB で、無料枠の 50 GiB に十分収まります。
 - **プラットフォームのリクエストログ。** Cloud Run は HTTP 呼び出しごとにリクエストログ（`run.googleapis.com/requests`）も書き出し、その内容は wide event と大部分が重複します。`logName:"run.googleapis.com%2Frequests" AND httpRequest.status<400` のような除外フィルタで成功分を落とせます。料金ページではログバケットへの取り込みに課金すると定義されているので、除外したログは課金されないはずです。実際の請求で確認してください。callable と HTTP 関数の wide event にも同じステータスとレイテンシの `httpRequest` が付くので、`httpRequest.status>=500` のクエリは、関数が返した応答を引き続き見つけられます。残しておくリクエストログ（ステータス 400 以上）には、コードではなくプラットフォームが応答したケースも含まれます。なお、監査ログ以外の通常のリクエストでクライアント IP が残るのは、このリクエストログだけです。
+- **Firebase 自身が書くエントリ。** `firebase-functions` 7.4 の callable ハンドラは、App Check と認証のトークンの検証を通った呼び出しごとに、DEBUG のエントリ「Callable request verification passed」を書きます（ソースを読み、Functions エミュレータでも確認しました）。このエントリにはラベル `firebase-log-type: callable-request-verification`（`logging.googleapis.com/labels` として書かれ、Cloud Logging はエントリの [`labels`](https://docs.cloud.google.com/logging/docs/structured-logging) として保存します）と、トークンごとの `VALID`・`MISSING`・`INVALID` を持つ `verifications` が付きます。大きさは 200〜300 バイトで、成功した呼び出しの wide event とほぼ同じです。wide event の `actor.appCheck` と `authUid` が、すでに同じことを伝えています。検証に失敗したときは、同じコードが同じラベルの WARNING を書きます。そちらは残す価値があるので、除外は DEBUG に限ります。コンソールでは、ログルーターで `_Default` シンクを編集し、次のフィルタで除外を追加します（ラベルのキーにハイフンがあるので、[クエリ言語が求めるとおり](https://docs.cloud.google.com/logging/docs/view/logging-query-language)引用符で囲みます）:
+
+  ```text
+  resource.type="cloud_run_revision" AND severity=DEBUG AND labels."firebase-log-type"="callable-request-verification"
+  ```
+
+  gcloud の場合は次のとおりです。このフラグは `name` と `filter` を取り、`description` と `disabled` も指定できます（[リファレンス](https://docs.cloud.google.com/sdk/gcloud/reference/logging/sinks/update)）:
+
+  ```sh
+  gcloud logging sinks update _Default --add-exclusion='name=firebase-callable-verification,filter=resource.type="cloud_run_revision" AND severity=DEBUG AND labels."firebase-log-type"="callable-request-verification"'
+  ```
+
+  除外フィルタに一致したエントリは、シンクの宛先にルーティングされません（[ログルーター](https://docs.cloud.google.com/logging/docs/routing/overview)）。あとでシンクを `gcloud logging sinks describe _Default` で確かめ、請求も確認してください。このフィルタは Firebase が書くエントリに対してテストしていて、Cloud Logging 自体では試していません。
 
 ## マスキング
 
@@ -2346,8 +2365,11 @@ bun test
 npm run typecheck
 npm run build          # dist/esm と dist/cjs
 npm run smoke          # ビルドを、実行中の Node で動かす
+npm run emulator       # パックしたパッケージを、実際の Functions エミュレータで動かす（firebase CLI が必要）
 npm pack --dry-run     # 公開した場合に含まれるもの
 ```
+
+`npm run emulator` は、パッケージをパックし、使い捨ての Firebase プロジェクトに入れ（resultlog に関係するのはそれだけで、neverthrow は同梱されています）、Functions エミュレータを起動して、13 個の関数を HTTP で呼びます。そして、返した応答と書き出したログを検査します。ステータスと `details`、投げられた例外の名前、タイムアウトのガード、重ねがけリトライの検知、トレース、`X-Forwarded-For` の後ろのクライアントアドレス、callable の呼び出しごとに Firebase が書く DEBUG エントリです。必要なのは `firebase` CLI（`npm install -g firebase-tools`、または `FIREBASE_CLI=/path/to/firebase`）、Node 22 以上、`npm install` のためのネットワークです。動くのは Functions エミュレータだけ（Firestore と Pub/Sub のエミュレータは使わず、イベントトリガーは対象外）なので、Java は要りません。1 分ほどかかり、CI には入れていません。検査に失敗したときは、使い捨てのプロジェクトがエミュレータの出力ごと残ります。
 
 ソースは `src/` に、関心ごとに 1 モジュールずつ分けてあります。構成、規約、リリースの手順は `AGENTS.md` を参照してください。CI は [Takumi Guard](https://shisho.dev/docs/ja/t/guard/quickstart/npm/) 経由でインストールし、リリースはワークフローが npm にステージして、メンテナーが 2FA で承認します。
 

@@ -12,8 +12,10 @@ import { callableRequest, captureLogs, cloudEvent } from "./testing.js";
 
 type Json = Record<string, any>;
 
+/** A path such as `jsonPayload.errorName` or `labels."firebase-log-type"`: a component with special characters is quoted. */
 function lookup(entry: Json, path: string): unknown {
-  return path.split(".").reduce<any>((value, key) => (value === undefined || value === null ? undefined : value[key]), entry);
+  const parts = (path.match(/"[^"]*"|[^.]+/g) ?? []).map((part) => part.replace(/^"|"$/g, ""));
+  return parts.reduce<any>((value, key) => (value === undefined || value === null ? undefined : value[key]), entry);
 }
 
 const SEVERITIES = ["DEFAULT", "DEBUG", "INFO", "NOTICE", "WARNING", "ERROR", "CRITICAL", "ALERT", "EMERGENCY"];
@@ -53,7 +55,8 @@ function matches(filter: string, entry: Json): boolean {
       expect(take()).toBe(")");
       return inner;
     }
-    const field = take();
+    let field = take();
+    while (field.endsWith(".") && peek()?.startsWith('"')) field += take(); // labels."firebase-log-type": the quoted component is a token of its own
     const op = take();
     const actual = lookup(entry, field);
     if (op === ":" && peek() === "*") {
@@ -91,8 +94,10 @@ function matches(filter: string, entry: Json): boolean {
 
 /** A log entry as Cloud Logging stores what resultlog wrote: `severity` is lifted out of the payload. */
 const asLogEntry = (entry: Json, service = "on-order"): Json => {
-  const { severity, httpRequest, ...jsonPayload } = entry; // Cloud Logging lifts both out of the payload
-  return { severity, httpRequest, jsonPayload, resource: { type: "cloud_run_revision", labels: { service_name: service } } };
+  // Cloud Logging lifts these out of the payload: severity, httpRequest and `logging.googleapis.com/labels` (which become the
+  // LogEntry's labels). The rest stays in jsonPayload. https://docs.cloud.google.com/logging/docs/structured-logging
+  const { severity, httpRequest, "logging.googleapis.com/labels": labels, ...jsonPayload } = entry;
+  return { severity, httpRequest, labels, jsonPayload, resource: { type: "cloud_run_revision", labels: { service_name: service } } };
 };
 
 // ---- Entries written by the library itself --------------------------------------------------------------------
@@ -701,6 +706,60 @@ describe("the console recipes in the README", () => {
     const jaSection = ja.slice(ja.indexOf("### コンソールで手作業で"), ja.indexOf("### ファイルとして書き出す"));
     expect(filtersOf(jaSection)).toEqual(filtersOf(section));
     expect(filtersOf(section)).toHaveLength(recipes.length);
+  });
+});
+
+// firebase-functions writes a DEBUG entry for every callable call whose tokens passed verification, and the README's Log cost
+// section tells how to exclude it. The filter has to drop that entry, and nothing else: not the WARNING that the same code
+// writes when verification fails (that one is worth reading), and none of resultlog's own entries.
+describe("the exclusion of Firebase's own entry for a callable call, in the README", () => {
+  // As the Functions emulator printed them (firebase-functions 7.4, `checkTokens` in common/providers/https.js).
+  const label = { "firebase-log-type": "callable-request-verification" };
+  const passed: Json = { verifications: { app: "MISSING", auth: "VALID" }, "logging.googleapis.com/labels": label, severity: "DEBUG", message: "Callable request verification passed" };
+  const failed: Json = {
+    verifications: { app: "MISSING", auth: "INVALID" },
+    "logging.googleapis.com/labels": label,
+    severity: "WARNING",
+    message: "Callable request verification failed: Auth token was rejected.",
+  };
+  const bulletOf = (file: string, from: string) => {
+    const text = readFileSync(join(import.meta.dir, "..", file), "utf8");
+    return text.slice(text.indexOf(from), text.indexOf("\n## ", text.indexOf(from)));
+  };
+  /** The first fenced block of a language, as the text inside it: the bullet indents its blocks, so the indentation goes. */
+  const fenced = (text: string, language: string) => {
+    const match = text.match(new RegExp(`^( *)\`\`\`${language}\\n([\\s\\S]*?)\\n\\1\`\`\``, "m"));
+    return match ? (match[2] as string).split("\n").map((line) => line.slice((match[1] as string).length)).join("\n") : "";
+  };
+  const english = bulletOf("README.md", "- **Firebase's own entry for every callable call.**");
+  const filter = fenced(english, "text");
+  const command = fenced(english, "sh");
+
+  test("drops the entry Firebase writes when verification passed", () => {
+    expect(filter).not.toBe("");
+    expect(matches(filter, asLogEntry(passed))).toBe(true);
+  });
+
+  test("keeps the WARNING that is written when verification failed", () => {
+    expect(matches(filter, asLogEntry(failed))).toBe(false);
+  });
+
+  test("matches none of the entries resultlog writes", async () => {
+    for (const [name, entries] of Object.entries(await scenarios())) {
+      expect(entries.some((entry) => matches(filter, asLogEntry(entry))), name).toBe(false);
+    }
+  });
+
+  test("the gcloud command carries the same filter (and gcloud splits its key=value pairs on commas, so it has none)", () => {
+    expect(filter).not.toContain(",");
+    expect(command).toContain("gcloud logging sinks update _Default --add-exclusion=");
+    expect(command).toContain(`filter=${filter}`);
+  });
+
+  test("the Japanese README gives the same filter and command", () => {
+    const japanese = bulletOf("README.ja.md", "- **Firebase 自身が書くエントリ。**");
+    expect(fenced(japanese, "text")).toBe(filter);
+    expect(fenced(japanese, "sh")).toBe(command);
   });
 });
 
