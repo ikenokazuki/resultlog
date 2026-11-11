@@ -154,22 +154,23 @@ Firebase Functions と Result 型を組み合わせるプロジェクトでは�
 ## インストール
 
 ```sh
-npm install resultlog neverthrow
+npm install resultlog
 ```
 
-`neverthrow`、`firebase-functions`、`firebase-admin` は peer dependency です。後ろの 2 つは Functions のプロジェクトにすでに入っているはずで、足りないものは npm が入れます。`zod` は任意です（下記）。
+[neverthrow](https://github.com/supermacro/neverthrow) は resultlog に同梱され、resultlog が再エクスポートします。ハンドラに必要なのは `import { ok, err, ResultAsync } from "resultlog"` だけで、pnpm や yarn でも動きます。自分でも `neverthrow` から import する場合、範囲が `^8.2.0` と重なっていれば、どちらも同じコピーに解決されます。
+
+`firebase-functions` と `firebase-admin` は peer dependency です。Functions のプロジェクトにはすでに入っているはずで、足りないものは npm が入れます。`zod` は任意です（下記）。
 
 ESM と CommonJS の両方と型定義を同梱していて、`module: nodenext`（Firebase の既定）、`bundler`、古い `node` の解決方法で使えます。
 
 必要なもの（Functions のプロジェクトなら、たいていはほとんど揃っています）:
 
-- Node.js 20 以上
+- Node.js 22 以上
 - `firebase-functions` 6 または 7（v2 API）と `firebase-admin`
-- `neverthrow` 8
 - `zod` 4: 任意。渡すスキーマの型にだけ必要です
 - TypeScript 5.4 以降
 
-テストは firebase-functions 7.4、6.6、6.0 で通り、peer 範囲が許す最低版（firebase-admin 11.10、firebase-functions 6.0、neverthrow 8.0、zod 4.0）でも通ります。型定義は、`skipLibCheck` が有効でなければ firebase-functions 7 が必要です（6 は `firebase-functions/v2/https` から `Response` と `CallableResponse` を export していないため）。
+テストは firebase-functions 7.4、6.6、6.0 で通り、peer 範囲が許す最低版（firebase-admin 11.10、firebase-functions 6.0、zod 4.0）でも通ります。型定義は、`skipLibCheck` が有効でなければ firebase-functions 7 が必要です（6 は `firebase-functions/v2/https` から `Response` と `CallableResponse` を export していないため）。
 
 エントリポイント: `resultlog`（サーバー側）、`resultlog/client`（アプリ側。サーバー側の import を含みません）、`resultlog/testing`、`resultlog/digest`、`resultlog/monitoring`、そして `resultlog` コマンド（`digest` と `monitoring`）。
 
@@ -178,9 +179,8 @@ ESM と CommonJS の両方と型定義を同梱していて、`module: nodenext`
 ```ts
 import { getFirestore } from "firebase-admin/firestore";
 import { onCall } from "firebase-functions/v2/https";
-import { err, ok, ResultAsync } from "neverthrow";
 import { z } from "zod";
-import { defineError, logContext, wrapCall } from "resultlog";
+import { defineError, err, logContext, ok, ResultAsync, wrapCall } from "resultlog";
 
 class UserNotFound extends defineError("UserNotFound", { code: "not-found", publicMessage: "ユーザーが見つかりません。" }) {}
 class DbError extends defineError("DbError", { code: "internal" }) {} // severity は ERROR。クライアントには "INTERNAL" だけが返る
@@ -223,6 +223,7 @@ resultlog が公開するものは次のとおりです。最初のグループ�
 - [`configure`](#configure-function): サンプリング、タイムアウト、マスキング、LLM の価格関数、actor の扱い、sink を設定します
 - [`firestoreIdempotency`](#firestoreidempotency-function): 1 つのイベントでイベントトリガーが 2 回動かないようにします
 - [`fingerprint`](#fingerprint-function): 失敗の種類に名前を付けます
+- [neverthrow](https://github.com/supermacro/neverthrow) 自身の API を再エクスポートします（`ok`、`err`、`okAsync`、`errAsync`、`Result`、`ResultAsync`、`Ok`、`Err`、`safeTry`、`fromPromise`、`fromSafePromise`、`fromThrowable`、`fromAsyncThrowable`）。1 行の import で、ハンドラと、それが返す `Result` の両方が使えます
 
 **`resultlog/testing`**: [`captureLogs`](#capturelogs-function)、[`callableRequest`](#callablerequest-function)、[`httpExchange`](#httpexchange-function)、[`cloudEvent`](#cloudevent-function)、[`authBlockingEvent`](#authblockingevent-function)
 
@@ -240,7 +241,7 @@ resultlog が公開するものは次のとおりです。最初のグループ�
 
 ## API ドキュメント
 
-各例は、必要な import がファイルの先頭にあるものとして書いてあります。[クイックスタート](#クイックスタート)に、まとめて載せています。`Outcome<T>` は、ハンドラが返してよいものを指します。`Result<T, AppError>`、`ResultAsync<T, AppError>`、`Promise<Result<T, AppError>>` のいずれかです。
+各例は、必要な import がファイルの先頭にあるものとして書いてあります。[クイックスタート](#クイックスタート)に、まとめて載せています。`Outcome<T>` は、ハンドラが返してよいものを指します。`Result<T, Error>`、`ResultAsync<T, Error>`、`Promise<Result<T, Error>>` のいずれかです。`AppError` でないエラーは、throw された例外と同じに扱われる（ERROR、`internal`、元の名前のまま）ので、resultlog を知らないコードの `Result` もそのまま使えます。想定している失敗は [`defineError`](#defineerror-function) で定義すると、コード、重大度、クライアント向けのメッセージが付きます。文字列や素のオブジェクトはスタックを持たないので、エラーとしては受け付けません。
 
 ### ハンドラアダプタ
 
@@ -264,7 +265,7 @@ interface HandlerOptions {
 }
 ```
 
-**throw された例外**は、元のスタックを保ったまま、コード `internal` の ERROR として記録されます。throw された `HttpsError` はコードと details を保つので、既存のハンドラをラップしても、クライアントが受け取るものは変わりません。
+**throw された例外**は、元のスタックと例外自身の名前（`errorName: "TypeError"`）を保ったまま、コード `internal` の ERROR として記録されます。バグがログ、メトリクスのラベル、digest の中でバグとして見分けられます。クライアントが受け取るのは引き続き `INTERNAL` だけです。throw された `HttpsError` はコードと details を保つので、既存のハンドラをラップしても、クライアントが受け取るものは変わりません。
 
 #### `wrapCall` (function)
 
@@ -289,9 +290,8 @@ function wrapCall<S extends ZodType, T>(
 
 ```ts
 import { onCall } from "firebase-functions/v2/https";
-import { err, ok } from "neverthrow";
 import { z } from "zod";
-import { defineError, wrapCall } from "resultlog";
+import { defineError, err, ok, wrapCall } from "resultlog";
 
 class SoldOut extends defineError("SoldOut", { code: "failed-precondition", publicMessage: "売り切れです。" }) {}
 
@@ -418,8 +418,7 @@ interface BlockingOptions extends HandlerOptions {
 
 ```ts
 import { beforeUserSignedIn } from "firebase-functions/v2/identity";
-import { err, ok } from "neverthrow";
-import { defineError, wrapBlocking } from "resultlog";
+import { defineError, err, ok, wrapBlocking } from "resultlog";
 
 class BlockedAddress extends defineError("BlockedAddress", { code: "permission-denied", publicMessage: "サインインできません。" }) {}
 
@@ -541,8 +540,7 @@ class InvalidInput extends AppError {} // code: "invalid-argument", securityEven
 **例:**
 
 ```ts
-import { err, ok } from "neverthrow";
-import { InvalidInput } from "resultlog";
+import { err, InvalidInput, ok } from "resultlog";
 
 // スキーマでは表せないチェック
 const checkRange = (from: Date, to: Date) =>
@@ -610,8 +608,7 @@ type ExternalClassification = Partial<Pick<AppErrorOptions, "code" | "severity" 
 **例:**
 
 ```ts
-import { ResultAsync } from "neverthrow";
-import { toExternalError } from "resultlog";
+import { ResultAsync, toExternalError } from "resultlog";
 
 const createIntent = (params: Stripe.PaymentIntentCreateParams) =>
   ResultAsync.fromPromise(stripe.paymentIntents.create(params), (e) =>
@@ -682,7 +679,7 @@ interface RetryOptions {
   maxDelayMs?: number;              // 1 回の待ちの最長。これより長い Retry-After ならリトライをやめる。既定は 2000
   budgetMs?: number;                // 最初の試行の開始からこの時間を超えて次の待ちが終わるなら、やめる。既定は 5000
   sdkRetriesDisabled?: boolean;     // SDK 自身のリトライを 0 にした
-  allowRepeatedRequests?: boolean;  // 呼び出しが意図して同じリクエストを繰り返す（ポーリング）
+  allowRepeatedRequests?: boolean;  // 呼び出しが、失敗の後に意図して同じリクエストを再送する
 }
 ```
 
@@ -694,7 +691,7 @@ import { retry } from "resultlog";
 const getPartner = (url: string) => retry(() => fetchPartner(url), { attempts: 3, budgetMs: 3000 });
 ```
 
-- ほかのリトライの層には決して重なりません。Stripe、OpenAI、Anthropic は、SDK のリトライを切って `sdkRetriesDisabled: true` を渡さない限り型エラーです。それ以外の呼び出しでは、1 回の試行の中で同じ HTTP リクエストが 2 回送られたことを実行時に検知して止めます。[リトライを重ねない](#リトライを重ねない)を読んでください。
+- ほかのリトライの層には決して重なりません。Stripe、OpenAI、Anthropic は、SDK のリトライを切って `sdkRetriesDisabled: true` を渡さない限り型エラーです。それ以外の呼び出しでは、1 回の試行の中で、失敗した同じ HTTP リクエストが再送されたことを実行時に検知して止めます。[リトライを重ねない](#リトライを重ねない)を読んでください。
 - [タイムアウトのガード](#タイムアウト)の期限を知っていて、それを超えて待ちません。
 - リトライした、あるいはしようとして止まった `retry()` は、エントリに `retries` として記録されます。
 
@@ -1722,13 +1719,14 @@ declare module "resultlog" {
 }
 ```
 
-**実行時**には、一覧にあるかどうかにかかわらず、あらゆる SDK・関数を対象にします。`retry()` は Node の `diagnostics_channel` で外部への HTTP リクエストを観測します。対象は fetch で送ったものと、axios や Stripe SDK が使う `http` モジュールで送ったものです。1 回の試行で同じリクエストが 2 回以上送られていたら、内側の何か（axios-retry、SDK、入れ子の `retry()`）が既にリトライしています。その場合 `retry()` は呼び出しを増やさずに止め、`stoppedBy: "internal-retry"` と繰り返されたリクエストを記録します。テスト（`NODE_ENV=test`）とエミュレータ（`FUNCTIONS_EMULATOR=true`）では代わりに例外を投げるので、本番より前に気付けます。検知は axios-retry、Stripe SDK、OpenAI SDK を使って Node 26 で、観測に使うチャネルは Node 20・22・26 で確認しています。
+**実行時**には、一覧にあるかどうかにかかわらず、あらゆる SDK・関数を対象にします。`retry()` は Node の `diagnostics_channel` で外部への HTTP リクエストを観測します。対象は fetch で送ったものと、axios や Stripe SDK が使う `http` モジュールで送ったものです。1 回の試行の中で、失敗した（接続が切れた、または 408・409・429・5xx が返った）後に同じリクエストが再び送られていたら、内側の何か（axios-retry、SDK、入れ子の `retry()`）が既にリトライしています。その場合 `retry()` は呼び出しを増やさずに止め、`stoppedBy: "internal-retry"` と、繰り返されたリクエストをクエリ文字列を除いたパスで記録します（クエリには秘密が入っていることがあるためです）。テスト（`NODE_ENV=test`）とエミュレータ（`FUNCTIONS_EMULATOR=true`）では代わりに例外を投げるので、本番より前に気付けます。検知は axios-retry、Stripe SDK、OpenAI SDK を使って Node 26 で、観測に使うチャネルは Node 22・26 で確認しています。CI が Node 22・24・26 で実行するスモークテストも、実際の `fetch` と `http` のリクエストをローカルサーバーに送って確かめます。
 
 実行時の検知には限界があります:
 
 - 分かるのは「実際に起きたリトライ」で、「起こり得るリトライ」ではありません。内側の層が実際にリトライしたときにだけ発動します。
 - HTTP/2 のリクエスト（gRPC、つまり Firestore）や、HTTP リクエストを伴わないリトライは観測できません。
-- ポーリングのように同じリクエストを意図的に繰り返す呼び出しは、リトライのように見えます。`{ allowRepeatedRequests: true }` を渡してください。
+- 数えるのは、失敗の後に再送されたリクエストだけです。応答が返った 2 つのリクエスト（1 つのモデルのエンドポイントへの 2 回のプロンプト、URL が 1 つの JSON-RPC API、200 が返り続けるポーリング）は、リトライには見えません。エラーをはさんでも意図的に問い合わせ続けるポーリングのような呼び出しは見えるので、`{ allowRepeatedRequests: true }` を渡してください。
+- リクエストは、メソッド・ホスト・クエリ文字列つきのパスで区別します。本文は見ません。
 - Node は組み込みのチャネルを実験的（Experimental）扱いにしています。
 
 ## 外部への呼び出し
@@ -2308,7 +2306,7 @@ Cloud Logging は、毎月プロジェクトあたり最初の 50 GiB を超え�
   configure({ successSampleRate: 0.1, slowMs: 1000 }); // 1 秒未満で終わった成功は 10% だけ残す
   ```
 
-  失敗、`slowMs` より遅い実行、監査イベントのある実行、回復済みエラーのある実行、重複イベント、コールドスタート、途中で切れた・差し控えられた・中断された LLM 呼び出しのある実行は常に記録します。サンプリングで残ったログには `sampleRate` が付くので、集計時は件数を `1 / sampleRate` 倍してください。
+  失敗、`slowMs` より遅い実行、監査イベントのある実行、回復済みエラーのある実行、リトライが必要だった実行、重複イベント、コールドスタート、途中で切れた・差し控えられた・中断された LLM 呼び出しのある実行は常に記録します。サンプリングで残ったログには `sampleRate` が付くので、集計時は件数を `1 / sampleRate` 倍してください。
 - **サイズ上限。** 2,000 文字を超える文字列と 100 要素を超える配列は切り詰め、5 階層より深い値は `"[Truncated]"` にします。Cloud Logging は 256 KB を超えるエントリを受け付けないため、100 KB を超えたエントリは主要な項目（エラー名とコード、actor、所要時間など）と `truncatedBytes` だけに置き換えます。
 - **全エントリへの actor**（`configure({ actor: "all" })`）は、1 エントリあたり 100〜250 バイト増えます。成功ログをサンプリングで間引く（`successSampleRate`）と、digest が見られる通常トラフィックも薄くなります。
 - **`httpRequest` と `context`。** callable と HTTP 関数の `httpRequest` は、そのエントリごとに約 90 バイト増え、ERROR の `context` はさらに約 90 バイト増えます。月 300 万回の実行なら約 0.25 GiB です。actor が出る場所では、アドレスとユーザーエージェントが `actor` に加えて `httpRequest`（ERROR では `context` にも）に書かれるので、ユーザーエージェントが長いと数百バイトさらに増えます。どちらも Logs Explorer と Error Reporting が自分で読む標準のフィールドです。オフにする設定はありません。

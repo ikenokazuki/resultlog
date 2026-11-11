@@ -154,22 +154,23 @@ Projects that combine Firebase Functions with a Result type tend to rebuild the 
 ## Installation
 
 ```sh
-npm install resultlog neverthrow
+npm install resultlog
 ```
 
-`neverthrow`, `firebase-functions` and `firebase-admin` are peer dependencies; a Functions project already has the last two, and npm installs the ones that are missing. `zod` is optional (see below).
+[neverthrow](https://github.com/supermacro/neverthrow) comes with resultlog, which re-exports it: `import { ok, err, ResultAsync } from "resultlog"` is all a handler needs, and it works with pnpm and yarn as well. If you also import it from `neverthrow` yourself, both resolve to the same copy as long as your range overlaps `^8.2.0`.
+
+`firebase-functions` and `firebase-admin` are peer dependencies; a Functions project already has them, and npm installs the ones that are missing. `zod` is optional (see below).
 
 It ships as ESM and CommonJS with type declarations, and works with `module: nodenext` (the Firebase default), `bundler` and the older `node` resolution.
 
 Requirements (a typical Functions project has most of them already):
 
-- Node.js 20+
+- Node.js 22+
 - `firebase-functions` 6 or 7 (the v2 API) and `firebase-admin`
-- `neverthrow` 8
 - `zod` 4: optional, needed only for the types of the schemas you pass
 - TypeScript 5.4 or later
 
-The test suite passes against firebase-functions 7.4, 6.6 and 6.0, and against the lowest versions the peer ranges allow (firebase-admin 11.10, firebase-functions 6.0, neverthrow 8.0, zod 4.0). The type declarations need firebase-functions 7 unless `skipLibCheck` is on, because 6 doesn't export `Response` or `CallableResponse` from `firebase-functions/v2/https`.
+The test suite passes against firebase-functions 7.4, 6.6 and 6.0, and against the lowest versions the peer ranges allow (firebase-admin 11.10, firebase-functions 6.0, zod 4.0). The type declarations need firebase-functions 7 unless `skipLibCheck` is on, because 6 doesn't export `Response` or `CallableResponse` from `firebase-functions/v2/https`.
 
 Entry points: `resultlog` (the server side), `resultlog/client` (for the app: no server-side imports), `resultlog/testing`, `resultlog/digest`, `resultlog/monitoring`, and the `resultlog` command (`digest` and `monitoring`).
 
@@ -178,9 +179,8 @@ Entry points: `resultlog` (the server side), `resultlog/client` (for the app: no
 ```ts
 import { getFirestore } from "firebase-admin/firestore";
 import { onCall } from "firebase-functions/v2/https";
-import { err, ok, ResultAsync } from "neverthrow";
 import { z } from "zod";
-import { defineError, logContext, wrapCall } from "resultlog";
+import { defineError, err, logContext, ok, ResultAsync, wrapCall } from "resultlog";
 
 class UserNotFound extends defineError("UserNotFound", { code: "not-found", publicMessage: "User not found." }) {}
 class DbError extends defineError("DbError", { code: "internal" }) {} // ERROR severity; the client only sees "INTERNAL"
@@ -223,6 +223,7 @@ resultlog exposes the following. The first group is `resultlog` itself, for the 
 - [`configure`](#configure-function) sets sampling, the timeout, redaction, the LLM price function, the actor policy and the sink
 - [`firestoreIdempotency`](#firestoreidempotency-function) keeps an event trigger from running twice for one event
 - [`fingerprint`](#fingerprint-function) names a kind of failure
+- [neverthrow](https://github.com/supermacro/neverthrow)'s own API is re-exported (`ok`, `err`, `okAsync`, `errAsync`, `Result`, `ResultAsync`, `Ok`, `Err`, `safeTry`, `fromPromise`, `fromSafePromise`, `fromThrowable`, `fromAsyncThrowable`), so one import line serves the handler and the `Result` it returns
 
 **`resultlog/testing`**: [`captureLogs`](#capturelogs-function), [`callableRequest`](#callablerequest-function), [`httpExchange`](#httpexchange-function), [`cloudEvent`](#cloudevent-function), [`authBlockingEvent`](#authblockingevent-function)
 
@@ -240,7 +241,7 @@ resultlog exposes the following. The first group is `resultlog` itself, for the 
 
 ## API Documentation
 
-Every example assumes the imports it needs are at the top of the file; the [Quick start](#quick-start) shows them in one place. `Outcome<T>` stands for what a handler may return: a `Result<T, AppError>`, a `ResultAsync<T, AppError>` or a `Promise<Result<T, AppError>>`.
+Every example assumes the imports it needs are at the top of the file; the [Quick start](#quick-start) shows them in one place. `Outcome<T>` stands for what a handler may return: a `Result<T, Error>`, a `ResultAsync<T, Error>` or a `Promise<Result<T, Error>>`. An error that is not an `AppError` is treated like a thrown exception (ERROR, `internal`, under its own name), so `Result`s from code that knows nothing of resultlog work as they are; define the failures you expect with [`defineError`](#defineerror-function), so that they get a code, a severity and a message for the client. A string or a plain object is not accepted as an error: it carries no stack.
 
 ### Handler adapters
 
@@ -264,7 +265,7 @@ interface HandlerOptions {
 }
 ```
 
-**Thrown exceptions** are logged as ERROR with code `internal`, keeping the original stack. A thrown `HttpsError` keeps its code and details, so an existing handler can be wrapped without changing what its clients receive.
+**Thrown exceptions** are logged as ERROR with code `internal`, keeping the original stack and the exception's own name (`errorName: "TypeError"`), so a bug reads as one in the log, in the metric labels and in the digest. The client still sees only `INTERNAL`. A thrown `HttpsError` keeps its code and details, so an existing handler can be wrapped without changing what its clients receive.
 
 #### `wrapCall` (function)
 
@@ -289,9 +290,8 @@ function wrapCall<S extends ZodType, T>(
 
 ```ts
 import { onCall } from "firebase-functions/v2/https";
-import { err, ok } from "neverthrow";
 import { z } from "zod";
-import { defineError, wrapCall } from "resultlog";
+import { defineError, err, ok, wrapCall } from "resultlog";
 
 class SoldOut extends defineError("SoldOut", { code: "failed-precondition", publicMessage: "Sold out." }) {}
 
@@ -418,8 +418,7 @@ interface BlockingOptions extends HandlerOptions {
 
 ```ts
 import { beforeUserSignedIn } from "firebase-functions/v2/identity";
-import { err, ok } from "neverthrow";
-import { defineError, wrapBlocking } from "resultlog";
+import { defineError, err, ok, wrapBlocking } from "resultlog";
 
 class BlockedAddress extends defineError("BlockedAddress", { code: "permission-denied", publicMessage: "Sign-in is not available." }) {}
 
@@ -541,8 +540,7 @@ class InvalidInput extends AppError {} // code: "invalid-argument", securityEven
 **Example:**
 
 ```ts
-import { err, ok } from "neverthrow";
-import { InvalidInput } from "resultlog";
+import { err, InvalidInput, ok } from "resultlog";
 
 // a check a schema can't express
 const checkRange = (from: Date, to: Date) =>
@@ -610,8 +608,7 @@ type ExternalClassification = Partial<Pick<AppErrorOptions, "code" | "severity" 
 **Example:**
 
 ```ts
-import { ResultAsync } from "neverthrow";
-import { toExternalError } from "resultlog";
+import { ResultAsync, toExternalError } from "resultlog";
 
 const createIntent = (params: Stripe.PaymentIntentCreateParams) =>
   ResultAsync.fromPromise(stripe.paymentIntents.create(params), (e) =>
@@ -682,7 +679,7 @@ interface RetryOptions {
   maxDelayMs?: number;              // longest single wait; a longer Retry-After stops retrying. Default 2000
   budgetMs?: number;                // stop when the next wait would end this long after the first attempt started. Default 5000
   sdkRetriesDisabled?: boolean;     // you set the SDK's own retries to 0
-  allowRepeatedRequests?: boolean;  // the call repeats the same request on purpose (polling)
+  allowRepeatedRequests?: boolean;  // the call sends the same request again after a failure, on purpose
 }
 ```
 
@@ -694,7 +691,7 @@ import { retry } from "resultlog";
 const getPartner = (url: string) => retry(() => fetchPartner(url), { attempts: 3, budgetMs: 3000 });
 ```
 
-- It never stacks on another retry layer. For Stripe, OpenAI and Anthropic it is a type error unless you turned the SDK's retries off and pass `sdkRetriesDisabled: true`; for any other call it notices at run time that one attempt sent the same HTTP request twice, and stops. Read [Retries never stack](#retries-never-stack).
+- It never stacks on another retry layer. For Stripe, OpenAI and Anthropic it is a type error unless you turned the SDK's retries off and pass `sdkRetriesDisabled: true`; for any other call it notices at run time that one attempt sent the same HTTP request again after it failed, and stops. Read [Retries never stack](#retries-never-stack).
 - It knows the [timeout guard](#timeouts)'s deadline: it doesn't wait past it.
 - Each `retry()` that retried, or wanted to and stopped, is recorded in the entry as `retries`.
 
@@ -1722,13 +1719,14 @@ declare module "resultlog" {
 }
 ```
 
-**At run time**, for any SDK or function, listed or not. `retry()` watches outgoing HTTP requests through Node's `diagnostics_channel`: those sent with fetch, and those sent with the `http` module, which axios and the Stripe SDK use. If one attempt sent the same request more than once, something inside has already retried: axios-retry, an SDK, or a nested `retry()`. `retry()` then stops instead of multiplying the calls, and records `stoppedBy: "internal-retry"` with the repeated request. In tests (`NODE_ENV=test`) and in the emulator (`FUNCTIONS_EMULATOR=true`) it throws instead, so you find out before production. The detection was checked with axios-retry and the Stripe and OpenAI SDKs on Node 26, and the channels it relies on with Node 20, 22 and 26.
+**At run time**, for any SDK or function, listed or not. `retry()` watches outgoing HTTP requests through Node's `diagnostics_channel`: those sent with fetch, and those sent with the `http` module, which axios and the Stripe SDK use. If one attempt sent the same request again after it had failed (the connection dropped, or the answer was a 408, 409, 429 or a 5xx), something inside has already retried: axios-retry, an SDK, or a nested `retry()`. `retry()` then stops instead of multiplying the calls, and records `stoppedBy: "internal-retry"` with the repeated request, as a path without its query string, which can hold a secret. In tests (`NODE_ENV=test`) and in the emulator (`FUNCTIONS_EMULATOR=true`) it throws instead, so you find out before production. The detection was checked with axios-retry and the Stripe and OpenAI SDKs on Node 26, and the channels it relies on with Node 22 and 26. The smoke test that CI runs on Node 22, 24 and 26 also sends real `fetch` and `http` requests to a local server and checks it.
 
 The run-time check has limits:
 
 - It sees retries that happened, not retries that could happen, so it fires only once the inner layer has actually retried.
 - It doesn't see HTTP/2 requests (gRPC, so Firestore) or retries that involve no HTTP request.
-- A call that repeats the same request on purpose, such as polling, looks like a retry. Pass `{ allowRepeatedRequests: true }`.
+- Only a request sent again after a failure counts. Two requests that were both answered (two prompts to one model endpoint, a JSON-RPC API with a single URL, polling that keeps getting a 200) never look like a retry. A call that deliberately asks again after a failure, such as polling that keeps going through errors, does: pass `{ allowRepeatedRequests: true }`.
+- Requests are told apart by method, host and path with its query string, not by their body.
 - Node marks its built-in channels as experimental.
 
 ## Outgoing calls
@@ -2308,7 +2306,7 @@ Cloud Logging charges $0.50 per GiB ingested after the first 50 GiB per project 
   configure({ successSampleRate: 0.1, slowMs: 1000 }); // keep 10% of successes faster than 1 s
   ```
 
-  Failures, runs slower than `slowMs`, audited runs, runs with handled errors, duplicates, cold starts and runs with a cut-off, withheld or interrupted LLM call are always logged. Sampled entries carry `sampleRate`, so multiply counts by `1 / sampleRate` when you aggregate.
+  Failures, runs slower than `slowMs`, audited runs, runs with handled errors, runs that needed a retry, duplicates, cold starts and runs with a cut-off, withheld or interrupted LLM call are always logged. Sampled entries carry `sampleRate`, so multiply counts by `1 / sampleRate` when you aggregate.
 - **Size caps.** Strings longer than 2,000 characters and arrays longer than 100 items are cut, and values nested deeper than 5 levels become `"[Truncated]"`. An entry larger than 100 KB is replaced by its key fields (error name and code, actor, duration, …) plus `truncatedBytes`, because Cloud Logging rejects entries over 256 KB.
 - **The actor on every entry** (`configure({ actor: "all" })`) adds 100 to 250 bytes to each entry. Sampling successes away (`successSampleRate`) then also thins what the digest can see of ordinary traffic.
 - **`httpRequest` and `context`.** The `httpRequest` of a callable or HTTP function adds about 90 bytes to each of its entries, and the `context` of an ERROR about 90 more; for 3 million invocations a month that is about 0.25 GiB. Where the actor is shown, the address and user agent are written in `httpRequest` as well as in `actor` (and in the `context` of an ERROR), which adds up to a few hundred bytes more when the user agent is long. They are standard fields that Logs Explorer and Error Reporting read themselves; there is no switch to turn them off.
