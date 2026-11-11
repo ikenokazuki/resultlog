@@ -208,6 +208,16 @@ function percentile(values: [value: number, weight: number][], p: number): numbe
 }
 
 const sum = (numbers: number[]) => numbers.reduce((a, b) => a + b, 0);
+
+/**
+ * Adds to the list under `key`. Building a new list for every entry (`[...old, entry]`) made a big log quadratic: grouping
+ * 80,000 entries into one group took twenty seconds.
+ */
+function append<K, V>(map: Map<K, V[]>, key: K, value: V): void {
+  const list = map.get(key);
+  if (list) list.push(value);
+  else map.set(key, [value]);
+}
 const minuteOf = (time: number) => `${new Date(time).toISOString().slice(0, 16)}:00Z`;
 const firstLine = (text: unknown) => String(text ?? "").split("\n")[0] ?? "";
 /** The shape of a message, so that "timeout after 120 ms for order 5512" and "... 90 ms for order 77" are one kind. */
@@ -229,31 +239,40 @@ function pseudonymizer(enabled: boolean) {
 
 type Who = ReturnType<typeof pseudonymizer>;
 
-/** A copy small enough to paste: a few lines of stack, a few breadcrumbs, short strings. */
-function shrink(value: unknown, depth = 0): unknown {
+// Where resultlog writes who made a request: the actor, authUid, httpRequest (Cloud Logging's) and context (Error
+// Reporting's). They are found by key wherever they sit, so that a field added later is covered without being listed.
+const WHO_KEYS = new Map<string, "user" | "ip" | "ua">([
+  ["uid", "user"],
+  ["user", "user"],
+  ["authUid", "user"],
+  ["ip", "ip"],
+  ["remoteIp", "ip"],
+  ["forwardedFor", "ip"],
+  ["userAgent", "ua"],
+]);
+
+/**
+ * A copy small enough to paste: a few lines of stack, a few breadcrumbs, short strings. Who made the request is
+ * pseudonymized from the whole value before anything is cut short, so one person keeps one pseudonym throughout.
+ */
+function shrink(value: unknown, who: Who, key?: string, depth = 0): unknown {
   if (typeof value === "string") {
+    const kind = key === undefined ? undefined : WHO_KEYS.get(key);
+    const hidden = kind && who(kind, value);
+    if (hidden && hidden !== value) return hidden;
     const text = value.split("\n").slice(0, 8).join("\n");
     return text.length > 400 ? `${text.slice(0, 400)}…` : text;
   }
-  if (Array.isArray(value)) return value.slice(-5).map((v) => shrink(v, depth + 1));
+  if (Array.isArray(value)) return value.slice(-5).map((v) => shrink(v, who, key, depth + 1));
   if (typeof value === "object" && value !== null) {
     if (depth > 4) return "…";
-    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, shrink(v, depth + 1)]));
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, shrink(v, who, k, depth + 1)]));
   }
   return value;
 }
 
 function sampleOf(entry: Entry, who: Who): Record<string, unknown> {
-  const sample = shrink({ severity: entry.severity, ...entry.fields }) as Fields;
-  if (typeof sample.authUid === "string") sample.authUid = who("user", entry.fields.authUid);
-  if (typeof sample.actor === "object" && sample.actor !== null) {
-    const actor = entry.fields.actor ?? {};
-    const named: Record<string, string> = { uid: "user", ip: "ip", forwardedFor: "ip", userAgent: "ua" };
-    sample.actor = Object.fromEntries(
-      Object.entries(sample.actor as Fields).map(([k, v]) => [k, named[k] ? who(named[k] as "user" | "ip" | "ua", actor[k]) : v]),
-    );
-  }
-  return sample;
+  return shrink({ severity: entry.severity, ...entry.fields }, who) as Fields;
 }
 
 export function digest(logs: unknown[], options: DigestOptions = {}): { data: Digest; markdown: string } {
@@ -272,7 +291,7 @@ export function digest(logs: unknown[], options: DigestOptions = {}): { data: Di
 
   // services
   const byService = new Map<string, Entry[]>();
-  for (const e of invocations) byService.set(e.service, [...(byService.get(e.service) ?? []), e]);
+  for (const e of invocations) append(byService, e.service, e);
   const services = [...byService]
     .map(([name, list]) => {
       const total = sum(list.map((e) => e.weight));
@@ -295,7 +314,7 @@ export function digest(logs: unknown[], options: DigestOptions = {}): { data: Di
   for (const e of failed) {
     const f = e.fields;
     const key = typeof f.fingerprint === "string" ? f.fingerprint : `~${createHash("sha1").update(`${f.errorName}|${f.errorCode}|${shapeOf(firstLine(f.message))}`).digest("hex").slice(0, 11)}`;
-    groups.set(key, [...(groups.get(key) ?? []), e]);
+    append(groups, key, e);
   }
   const failures = [...groups]
     .map(([fingerprint, list]) => {
@@ -624,7 +643,7 @@ function evaluate(rule: Rule, probes: Probe[]): Finding[] {
   for (const probe of probes) {
     if (!rule.filter(probe)) continue;
     const key = rule.key(probe);
-    if (key !== undefined && key !== "") groups.set(key, [...(groups.get(key) ?? []), probe]);
+    if (key !== undefined && key !== "") append(groups, key, probe);
   }
   const found: Finding[] = [];
   for (const [subject, list] of groups) {

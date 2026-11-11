@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { err } from "neverthrow";
 import { digest, parseLogs } from "./digest.js";
+import { AppError, configure, wrapBlocking, wrapCall } from "./index.js";
+import { authBlockingEvent, callableRequest, captureLogs } from "./testing.js";
 
 // Entries as resultlog writes them, and as `gcloud logging read --format=json` returns them.
 const success = (o: Record<string, unknown> = {}) => ({
@@ -370,4 +373,73 @@ describe("findings", () => {
   test("nothing is reported for calm traffic", () => {
     expect(findings([success(), failure(), security("authz_fail", mallory, 0)])).toEqual([]);
   });
+});
+
+describe("pseudonymize on the entries the library really writes", () => {
+  // The fixtures above are written by hand, so a field the library adds later is missing from them. These entries come
+  // out of wrapCall and wrapBlocking, with the actor shown, so they carry the three values in every place the library
+  // puts them: actor, authUid, httpRequest (Cloud Logging's) and context (Error Reporting's).
+  const uid = "uid-RAW-12345";
+  const ip = "203.0.113.77";
+  const userAgent = "Mozilla/RAW-UA-9";
+  const forwardedFor = "192.0.2.99";
+  const textOf = (logs: unknown[]) => {
+    const { data, markdown } = digest(logs, { pseudonymize: true });
+    return { text: markdown + JSON.stringify(data), data };
+  };
+
+  test("a failed call names no one, and one person keeps one pseudonym", async () => {
+    const captured = captureLogs();
+    configure({ actor: "all" });
+    try {
+      const request = callableRequest({}, { uid, ip });
+      const headers = (request.rawRequest as unknown as { headers: Record<string, string> }).headers;
+      headers["user-agent"] = userAgent;
+      headers["x-forwarded-for"] = `${forwardedFor}, ${ip}`; // the left-most address is the client's own claim
+      await wrapCall(() => err(new AppError("boom", { code: "internal" })))(request).catch(() => {});
+      const [entry] = captured.entries as Record<string, any>[];
+      // Without these the test would pass for the wrong reason: the entry has to hold the values outside `actor` too.
+      expect(entry?.actor).toMatchObject({ forwardedFor: `${forwardedFor}, ${ip}` });
+      expect(entry?.httpRequest).toMatchObject({ remoteIp: ip, userAgent });
+      expect(entry?.context).toMatchObject({ user: uid, httpRequest: { remoteIp: ip, userAgent } });
+
+      const { text, data } = textOf(captured.entries);
+      for (const secret of [uid, ip, userAgent, forwardedFor]) expect(text).not.toContain(secret);
+      const sample = data.failures[0]?.sample as Record<string, any>;
+      expect(sample.authUid).toMatch(/^user_[0-9a-f]{6}$/);
+      expect(sample.actor.uid).toBe(sample.authUid);
+      expect(sample.context.user).toBe(sample.authUid);
+      expect(sample.httpRequest.remoteIp).toBe(sample.actor.ip);
+      expect(sample.context.httpRequest.userAgent).toBe(sample.actor.userAgent);
+    } finally {
+      captured.restore();
+      configure({ actor: "security" });
+    }
+  });
+
+  test("a sign-in policy that broke leaves only the uid, in the context Error Reporting reads", async () => {
+    const captured = captureLogs();
+    try {
+      await wrapBlocking(() => {
+        throw new Error("policy exploded");
+      })(authBlockingEvent({ uid })).catch(() => {});
+      expect((captured.entries[0] as Record<string, any>).context).toMatchObject({ user: uid });
+      expect(textOf(captured.entries).text).not.toContain(uid);
+    } finally {
+      captured.restore();
+    }
+  });
+});
+
+describe("a large log", () => {
+  // Grouping used to copy the whole group for every entry it added, so the time grew with the square of the number of
+  // entries: 20,000 took about a second and 80,000 about twenty. The limit is generous, because a slow machine must not
+  // fail this test; the quadratic version needs several times as long.
+  test("is read in time proportional to its size", () => {
+    const logs = repeat(60_000, (i) => failure({ timestamp: sec(i) }));
+    const started = performance.now();
+    const { data } = digest(logs);
+    expect(performance.now() - started).toBeLessThan(3000);
+    expect(data.failures[0]).toMatchObject({ count: 60_000 });
+  }, 60_000);
 });
