@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { parseArgs } from "node:util";
 import { digest, parseLogs } from "./digest.js";
 import { files, type ThresholdName } from "./monitoring.js";
 
@@ -52,32 +53,61 @@ const fail = (message: string, help: string): number => {
   return 2;
 };
 
+/** What `parseArgs` throws for an option it does not know or one that lacks its value, as a value. */
+const attempt = <T>(read: () => T): T | Error => {
+  try {
+    return read();
+  } catch (error) {
+    return error as Error;
+  }
+};
+
+/** A number from an option; NaN when the text is not one (an empty text is not zero). */
+const numberOf = (text: string | undefined) => (text === undefined ? undefined : text.trim() === "" ? Number.NaN : Number(text));
+
+/** `name=N` options as an object, or undefined when one is not of that form. */
+function thresholdsOf(specs: string[] | undefined): Record<string, number> | undefined {
+  const out: Record<string, number> = {};
+  for (const spec of specs ?? []) {
+    const [name, value] = spec.split("=");
+    const number = numberOf(value);
+    if (!name || number === undefined || Number.isNaN(number)) return undefined;
+    out[name] = number;
+  }
+  return out;
+}
+
 function runDigest(args: string[]): number {
   if (args.includes("-h") || args.includes("--help")) {
     process.stdout.write(DIGEST_HELP);
     return 0;
   }
-  let file: string | undefined;
-  let format = "markdown";
-  let top: number | undefined;
-  let maxChars: number | undefined;
-  let pseudonymize = false;
-  let admins: string[] | undefined;
-  const thresholds: Record<string, number> = {};
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i] as string;
-    if (arg === "--format") format = args[++i] ?? "";
-    else if (arg === "--top") top = Number(args[++i]);
-    else if (arg === "--max-chars") maxChars = Number(args[++i]);
-    else if (arg === "--pseudonymize") pseudonymize = true;
-    else if (arg === "--admins") admins = (args[++i] ?? "").split(",").filter(Boolean);
-    else if (arg === "--threshold") {
-      const [name, value] = (args[++i] ?? "").split("=");
-      if (!name || Number.isNaN(Number(value))) return fail("Bad --threshold, expected rule=N.", DIGEST_HELP);
-      thresholds[name] = Number(value);
-    } else if (!arg.startsWith("-") && file === undefined) file = arg;
-    else return fail(`Unknown argument: ${arg}`, DIGEST_HELP);
-  }
+  // `--name value` and `--name=value` alike, as every command line tool takes them.
+  const read = attempt(() =>
+    parseArgs({
+      args,
+      allowPositionals: true,
+      options: {
+        format: { type: "string" },
+        top: { type: "string" },
+        "max-chars": { type: "string" },
+        pseudonymize: { type: "boolean" },
+        admins: { type: "string" },
+        threshold: { type: "string", multiple: true },
+      },
+    }),
+  );
+  if (read instanceof Error) return fail(`resultlog: ${read.message}`, DIGEST_HELP);
+  const { values, positionals } = read;
+  if (positionals.length > 1) return fail(`Unknown argument: ${positionals[1]}`, DIGEST_HELP);
+  const file = positionals[0];
+  const format = values.format ?? "markdown";
+  const top = numberOf(values.top);
+  const maxChars = numberOf(values["max-chars"]);
+  const pseudonymize = values.pseudonymize === true;
+  const admins = values.admins === undefined ? undefined : values.admins.split(",").filter(Boolean);
+  const thresholds = thresholdsOf(values.threshold);
+  if (thresholds === undefined) return fail("Bad --threshold, expected rule=N.", DIGEST_HELP);
   if (!["markdown", "json"].includes(format) || Number.isNaN(top) || Number.isNaN(maxChars)) return fail("Bad option value.", DIGEST_HELP);
   if (file === undefined && process.stdin.isTTY) {
     process.stdout.write(DIGEST_HELP);
@@ -102,26 +132,25 @@ function runMonitoring(args: string[]): number {
     process.stdout.write(MONITORING_HELP);
     return 0;
   }
-  let project: string | undefined;
-  let out = "monitoring";
-  let prefix: string | undefined;
-  const services: string[] = [];
-  const notificationChannels: string[] = [];
-  const thresholds: Partial<Record<ThresholdName, number>> = {};
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i] as string;
-    const value = () => args[++i] ?? "";
-    if (arg === "--project") project = value();
-    else if (arg === "--out") out = value();
-    else if (arg === "--prefix") prefix = value();
-    else if (arg === "--service") services.push(...value().split(",").filter(Boolean));
-    else if (arg === "--notification-channel") notificationChannels.push(value());
-    else if (arg === "--threshold") {
-      const [name, number] = value().split("=");
-      if (!name || number === undefined || number === "" || Number.isNaN(Number(number))) return fail("Bad --threshold, expected name=N.", MONITORING_HELP);
-      thresholds[name as ThresholdName] = Number(number);
-    } else return fail(`Unknown argument: ${arg}`, MONITORING_HELP);
-  }
+  const read = attempt(() =>
+    parseArgs({
+      args,
+      options: {
+        project: { type: "string" },
+        out: { type: "string" },
+        prefix: { type: "string" },
+        service: { type: "string", multiple: true },
+        "notification-channel": { type: "string", multiple: true },
+        threshold: { type: "string", multiple: true },
+      },
+    }),
+  );
+  if (read instanceof Error) return fail(`resultlog: ${read.message}`, MONITORING_HELP);
+  const { project, out = "monitoring", prefix } = read.values;
+  const services = (read.values.service ?? []).flatMap((names) => names.split(",")).filter(Boolean);
+  const notificationChannels = read.values["notification-channel"] ?? [];
+  const thresholds = thresholdsOf(read.values.threshold) as Partial<Record<ThresholdName, number>> | undefined;
+  if (thresholds === undefined) return fail("Bad --threshold, expected name=N.", MONITORING_HELP);
   if (project === undefined) return fail("--project is required.", MONITORING_HELP);
   let set: Record<string, string>;
   try {
