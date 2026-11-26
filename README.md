@@ -2350,6 +2350,8 @@ Patterns catch what a key name can't, such as a key inside a prompt, a URL or an
 
 Circular references become `"[Circular]"` and `bigint` values become strings. Objects with a `toJSON` method (dates, axios errors, Firestore timestamps) are written through it, and other class instances as their own fields.
 
+One thing is cut down in an error, wherever it is in the cause chain: a field that carries `headers` is a request or a response (axios's `config`, gaxios's `config` and `response`). Only its `method`, `host` and `status` are written, never the URL's path or query, the headers or the body, because redaction by key name can't reach inside a body that is a string. This covers errors only: a request or a response that you put in an attribute or a breadcrumb yourself is written as it is, with the redaction above.
+
 ## Limitations
 
 - Only work inside a wrapped handler is captured. What Google Cloud records about the project itself (Security Rules, IAM, keys) is in the Admin Activity audit log, which [`resultlog monitoring`](#changes-made-to-the-project-itself) watches.
