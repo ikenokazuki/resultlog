@@ -90,6 +90,32 @@ function hasToJSON(value: object): value is { toJSON(): unknown } {
 }
 
 /**
+ * A request or a response that an error carries (axios's `config`, gaxios's `config` and `response`, ...) says which
+ * call failed, and also everything that was sent: keys and personal data in the body, which redaction by key name
+ * can't reach inside a string, secrets in headers it doesn't know, and in the URL's path or query. What carries
+ * headers is such a thing, whatever it is called; only its method, host and status are written.
+ */
+function withoutExchange(value: unknown): unknown {
+  if (typeof value !== "object" || value === null || !("headers" in value)) return value;
+  const { status, config } = value as { status?: unknown; config?: unknown };
+  const request = (typeof config === "object" && config !== null ? config : value) as Record<string, unknown>;
+  return {
+    status: typeof status === "number" ? status : undefined,
+    method: typeof request.method === "string" ? request.method : undefined,
+    host: hostOf(request.url) ?? hostOf(request.baseURL),
+  };
+}
+
+/** The host of an absolute URL (a string or a URL). Never the path or the query, which can hold secrets. */
+function hostOf(url: unknown): string | undefined {
+  try {
+    return url === undefined ? undefined : new URL(String(url)).host || undefined;
+  } catch {
+    return undefined; // a relative path
+  }
+}
+
+/**
  * An Error as plain fields. Its message, stack and cause are not enumerable, and `toJSON` (axios, HttpsError) is far
  * smaller than the own fields. `stack: false` leaves the stack out, for an error whose stack the entry already holds.
  */
@@ -97,6 +123,7 @@ export function errorFields(error: Error, { stack = true }: { stack?: boolean } 
   const { name, message, cause } = error;
   const fields = hasToJSON(error) ? (error.toJSON() as object) : error;
   const out: Record<string, unknown> = { ...fields, name, message, stack: error.stack, cause };
+  for (const [key, value] of Object.entries(out)) out[key] = withoutExchange(value);
   if (!stack) delete out.stack; // toJSON may carry it as well
   return out;
 }

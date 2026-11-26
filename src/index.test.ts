@@ -223,6 +223,33 @@ describe("wrapCall", () => {
     expect(writes[0].cause).toMatchObject({ message: "Request failed", status: 502 });
   });
 
+  test("an error that carries its HTTP exchange is logged without what was sent", async () => {
+    const config = {
+      method: "post",
+      url: "https://hooks.example.com/services/PATH-SECRET?app_secret=QUERY-SECRET",
+      headers: { "x-api-sig": "HEADER-SECRET" },
+      data: '{"ApiKey":"BODY-SECRET","address":"BODY-ADDRESS"}',
+    };
+    // axios: the exchange is in what toJSON returns.
+    const axiosLike = Object.assign(new Error("Request failed"), {
+      toJSON: () => ({ message: "Request failed", code: "ERR_BAD_REQUEST", status: 400, config }),
+    });
+    // gaxios and others without toJSON: own fields, with a request path that is relative to a base URL.
+    const ownFields = Object.assign(new Error("Request failed"), {
+      config: { method: "get", baseURL: "https://api.example.com", url: "/v1/PATH-SECRET", headers: {} },
+      response: { status: 403, headers: {}, data: { email: "BODY-ADDRESS" }, config },
+    });
+    await wrapCall(() => err(toExternalError("carrier", axiosLike)))(callRequest()).catch(() => {});
+    await wrapCall(() => err(new DbError("failed", { cause: ownFields })))(callRequest()).catch(() => {});
+
+    expect(JSON.stringify(writes)).not.toMatch(/PATH-SECRET|QUERY-SECRET|HEADER-SECRET|BODY-SECRET|BODY-ADDRESS/);
+    expect(writes[0].cause).toMatchObject({ code: "ERR_BAD_REQUEST", status: 400, config: { method: "post", host: "hooks.example.com" } });
+    expect(writes[1].cause).toMatchObject({
+      config: { method: "get", host: "api.example.com" },
+      response: { status: 403, method: "post", host: "hooks.example.com" },
+    });
+  });
+
   test("exceptions of different kinds thrown from one place are different failures", async () => {
     const fail = (kind: "type" | "range") => {
       throw kind === "type" ? new TypeError("bad") : new RangeError("bad");
